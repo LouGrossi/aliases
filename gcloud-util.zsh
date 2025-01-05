@@ -82,8 +82,6 @@ function show_main_help() {
     echo "\nAvailable commands:"
     echo "  iam             - IAM role and permission management"
     echo "  projects        - GCP projects management"
-    echo "  backup          - Backup GCP resources"
-    echo "  restore         - Restore GCP resources from backup"
     echo "  help           - Show this help message"
     echo "\nUsage:"
     echo "  gcloud-util <command> [subcommand] [options]"
@@ -104,6 +102,8 @@ function show_iam_help() {
     echo "  list-users     - List all IAM users in a project or organization"
     echo "  merge-roles    - Merge multiple IAM roles into a new role"
     echo "  search-roles   - Search for roles across all projects and organization"
+    echo "  backup         - Backup IAM configurations"
+    echo "  restore        - Restore IAM configurations from backup"
     echo "  help          - Show this help message"
     echo "\nUsage:"
     echo "  gcloud-util iam <subcommand> [options]"
@@ -116,6 +116,8 @@ function show_iam_help() {
     echo "  gcloud-util iam list-roles --project-id my-project"
     echo "  gcloud-util iam describe-user --org-id 123456789 --user user@example.com"
     echo "  gcloud-util iam list-users --project-id my-project"
+    echo "  gcloud-util iam backup --project-id my-project --user user@example.com"
+    echo "  gcloud-util iam restore --dir /path/to/backup"
 }
 
 # Function to show backup help
@@ -200,15 +202,16 @@ function execute_all_scope() {
     local output=$3
     local extra_args=$4
     local all_flag=$5
+    local search_filter=${6:-"bindings.members~'user:|serviceAccount:'"}
 
     echo "Executing on organization $org_id..."
     echo "----------------------------------------"
     case "$cmd_type" in
         "list-users")
-            format_gcloud_output "gcloud organizations get-iam-policy \"$org_id\" --flatten=\"bindings[].members\" --filter=\"bindings.members~'user:|serviceAccount:'\"" "$output" "bindings.members,bindings.role"
+            format_gcloud_output "gcloud organizations get-iam-policy \"$org_id\" --flatten=\"bindings[].members\" --filter=\"$search_filter\"" "$output" "bindings.members,bindings.role"
             ;;
         "list-roles")
-            format_gcloud_output "gcloud iam roles list --organization=\"$org_id\" --filter=\"custom\"" "$output" "name,title,description"
+            format_gcloud_output "gcloud iam roles list --organization=\"$org_id\" --filter=\"$extra_args\"" "$output" "name,title,description"
             ;;
         "describe-role")
             format_gcloud_output "gcloud iam roles describe $extra_args --organization=\"$org_id\"" "$output"
@@ -225,10 +228,10 @@ function execute_all_scope() {
         echo "----------------------------------------"
         case "$cmd_type" in
             "list-users")
-                format_gcloud_output "gcloud projects get-iam-policy \"$project\" --flatten=\"bindings[].members\" --filter=\"bindings.members~'user:|serviceAccount:'\"" "$output" "bindings.members,bindings.role"
+                format_gcloud_output "gcloud projects get-iam-policy \"$project\" --flatten=\"bindings[].members\" --filter=\"$search_filter\"" "$output" "bindings.members,bindings.role"
                 ;;
             "list-roles")
-                format_gcloud_output "gcloud iam roles list --project=\"$project\" --filter=\"custom\"" "$output" "name,title,description"
+                format_gcloud_output "gcloud iam roles list --project=\"$project\" --filter=\"$extra_args\"" "$output" "name,title,description"
                 ;;
             "describe-role")
                 format_gcloud_output "gcloud iam roles describe $extra_args --project=\"$project\"" "$output"
@@ -369,11 +372,8 @@ function gcloud-util() {
                     else
                         cmd="gcloud projects list --filter=\"NOT projectId:(sys-*)\""
                     fi
-                    if [[ -n "$output" ]]; then
-                        format_gcloud_output "$cmd" "$output" "projectId,name,projectNumber"
-                    else
-                        format_gcloud_output "$cmd" "table" "projectId,name,projectNumber"
-                    fi
+                    
+                    format_gcloud_output "$cmd" "$output" "projectId,name,projectNumber,lifecycleState"
                     ;;
 
                 *)
@@ -498,7 +498,8 @@ function gcloud-util() {
                         else
                             cmd="gcloud iam roles describe \"$role\" --organization=\"$organization\""
                         fi
-                        format_gcloud_output "$cmd" "$output"
+                        
+                        format_gcloud_output "$cmd" "$output" "name,title,description,stage,includedPermissions:sort=1"
                     fi
                     ;;
 
@@ -509,16 +510,20 @@ function gcloud-util() {
                         echo "  Lists all custom IAM roles defined in a GCP project or organization"
                         echo "  This includes both custom roles and predefined roles available"
                         echo "\nUsage:"
-                        echo "  gcloud-util iam list-roles (--project-id PROJECT_ID | --org-id ORG_ID) [--output FORMAT]"
+                        echo "  gcloud-util iam list-roles (--project-id PROJECT_ID | --org-id ORG_ID | --all ORG_ID) [--search TERM ...] [--output FORMAT]"
                         echo "\nRequired Parameters (one of):"
                         echo "  --project-id PROJECT_ID   : The Google Cloud Project ID"
                         echo "  --org-id ORG_ID          : The Google Cloud Organization ID"
                         echo "  --all ORG_ID             : Execute on organization and all its projects"
                         echo "\nOptional Parameters:"
+                        echo "  --search TERM            : Search term to filter roles (can be specified multiple times)"
+                        echo "                            When multiple terms are provided, roles must match ALL terms"
                         add_output_format_help
                         echo "\nExamples:"
                         echo "  gcloud-util iam list-roles --project-id my-project"
                         echo "  gcloud-util iam list-roles --org-id 123456789 --output yaml"
+                        echo "  gcloud-util iam list-roles --project-id my-project --search storage --search admin"
+                        echo "  gcloud-util iam list-roles --all 123456789 --search viewer"
                         return 0
                     fi
 
@@ -526,6 +531,7 @@ function gcloud-util() {
                     local organization=""
                     local all_org=""
                     local output=""
+                    local -a search_terms=()
 
                     # Parse arguments
                     while [[ $# -gt 2 ]]; do
@@ -550,6 +556,15 @@ function gcloud-util() {
                             --output)
                                 output="$4"
                                 shift 2
+                                ;;
+                            --search)
+                                if [[ -n "$4" && "$4" != -* ]]; then
+                                    search_terms+=("$4")
+                                    shift 2
+                                else
+                                    echo "Error: --search requires a search term"
+                                    return 1
+                                fi
                                 ;;
                             *)
                                 echo "Error: Unknown option: $3"
@@ -576,6 +591,14 @@ function gcloud-util() {
                         return 1
                     fi
 
+                    # Build search filter
+                    local search_filter="custom"
+                    if [[ ${#search_terms[@]} -gt 0 ]]; then
+                        for term in "${search_terms[@]}"; do
+                            search_filter+=" AND (title~'$term' OR description~'$term' OR name~'$term')"
+                        done
+                    fi
+
                     # Execute the command
                     if [[ -n "$all_org" ]]; then
                         local org_id="$all_org"
@@ -585,15 +608,16 @@ function gcloud-util() {
                                 return 1
                             fi
                         fi
-                        execute_all_scope "$org_id" "list-roles" "$output"
+                        execute_all_scope "$org_id" "list-roles" "$output" "$search_filter"
                     else
                         local cmd=""
                         if [[ -n "$project" ]]; then
-                            cmd="gcloud iam roles list --project=\"$project\""
+                            cmd="gcloud iam roles list --project=\"$project\" --filter=\"$search_filter\""
                         else
-                            cmd="gcloud iam roles list --organization=\"$organization\""
+                            cmd="gcloud iam roles list --organization=\"$organization\" --filter=\"$search_filter\""
                         fi
-                        format_gcloud_output "$cmd" "$output"
+                        
+                        format_gcloud_output "$cmd" "$output" "name,title,description,stage,etag"
                     fi
                     ;;
 
@@ -604,17 +628,21 @@ function gcloud-util() {
                         echo "  Lists all IAM users and their roles in a GCP project or organization"
                         echo "  This includes service accounts and user accounts with their associated roles"
                         echo "\nUsage:"
-                        echo "  gcloud-util iam list-users (--project-id PROJECT_ID | --org-id ORG_ID | --all ORG_ID) [--output FORMAT]"
+                        echo "  gcloud-util iam list-users (--project-id PROJECT_ID | --org-id ORG_ID | --all ORG_ID) [--search TERM ...] [--output FORMAT]"
                         echo "\nRequired Parameters (one of):"
                         echo "  --project-id PROJECT_ID   : The Google Cloud Project ID"
                         echo "  --org-id ORG_ID          : The Google Cloud Organization ID"
                         echo "  --all ORG_ID             : Execute on organization and all its projects"
                         echo "\nOptional Parameters:"
+                        echo "  --search TERM            : Search term to filter users (can be specified multiple times)"
+                        echo "                            When multiple terms are provided, users must match ALL terms"
                         add_output_format_help
                         echo "\nExamples:"
                         echo "  gcloud-util iam list-users --project-id my-project"
                         echo "  gcloud-util iam list-users --org-id 123456789"
                         echo "  gcloud-util iam list-users --all 123456789 --output table"
+                        echo "  gcloud-util iam list-users --project-id my-project --search john --search doe"
+                        echo "  gcloud-util iam list-users --all 123456789 --search admin"
                         return 0
                     fi
 
@@ -622,6 +650,7 @@ function gcloud-util() {
                     local organization=""
                     local all_org=""
                     local output=""
+                    local -a search_terms=()
 
                     # Parse arguments
                     while [[ $# -gt 2 ]]; do
@@ -646,6 +675,15 @@ function gcloud-util() {
                             --output)
                                 output="$4"
                                 shift 2
+                                ;;
+                            --search)
+                                if [[ -n "$4" && "$4" != -* ]]; then
+                                    search_terms+=("$4")
+                                    shift 2
+                                else
+                                    echo "Error: --search requires a search term"
+                                    return 1
+                                fi
                                 ;;
                             *)
                                 echo "Error: Unknown option: $3"
@@ -672,6 +710,14 @@ function gcloud-util() {
                         return 1
                     fi
 
+                    # Build search filter
+                    local search_filter="bindings.members~'user:|serviceAccount:'"
+                    if [[ ${#search_terms[@]} -gt 0 ]]; then
+                        for term in "${search_terms[@]}"; do
+                            search_filter+=" AND bindings.members~'$term'"
+                        done
+                    fi
+
                     # Execute the command
                     if [[ -n "$all_org" ]]; then
                         local org_id="$all_org"
@@ -681,14 +727,15 @@ function gcloud-util() {
                                 return 1
                             fi
                         fi
-                        execute_all_scope "$org_id" "list-users" "$output" "" "true"
+                        execute_all_scope "$org_id" "list-users" "$output" "" "true" "$search_filter"
                     else
                         local cmd=""
                         if [[ -n "$project" ]]; then
-                            cmd="gcloud projects get-iam-policy \"$project\" --flatten=\"bindings[].members\" --filter=\"bindings.members~'user:|serviceAccount:'\""
+                            cmd="gcloud projects get-iam-policy \"$project\" --flatten=\"bindings[].members\" --filter=\"$search_filter\""
                         else
-                            cmd="gcloud organizations get-iam-policy \"$organization\" --flatten=\"bindings[].members\" --filter=\"bindings.members~'user:|serviceAccount:'\""
+                            cmd="gcloud organizations get-iam-policy \"$organization\" --flatten=\"bindings[].members\" --filter=\"$search_filter\""
                         fi
+                        
                         format_gcloud_output "$cmd" "$output" "bindings.members,bindings.role"
                     fi
                     ;;
@@ -799,7 +846,8 @@ function gcloud-util() {
                         else
                             cmd="gcloud organizations get-iam-policy \"$organization\" --flatten=\"bindings[].members\" --filter=\"bindings.members:$user\""
                         fi
-                        format_gcloud_output "$cmd" "$output" "bindings.role"
+                        
+                        format_gcloud_output "$cmd" "$output" "bindings.role,bindings.members"
                     fi
                     ;;
 
@@ -818,17 +866,25 @@ function gcloud-util() {
                         echo "  --destination-role PATH : Full path where the merged role will be created"
                         echo "                           Format: projects/PROJECT_ID/roles/ROLE_ID"
                         echo "                                   organizations/ORG_ID/roles/ROLE_ID"
+                        echo "\nOptional Parameters:"
+                        add_output_format_help
                         echo "\nExamples:"
                         echo "  gcloud-util iam merge-roles \\"
                         echo "    --role projects/project1/roles/role1 \\"
                         echo "    --role projects/project2/roles/role2 \\"
                         echo "    --destination-role organizations/123456789/roles/merged-role"
+                        echo "  gcloud-util iam merge-roles \\"
+                        echo "    --role projects/project1/roles/role1 \\"
+                        echo "    --role projects/project2/roles/role2 \\"
+                        echo "    --destination-role organizations/123456789/roles/merged-role \\"
+                        echo "    --output yaml"
                         return 0
                     fi
 
                     local roles=()
                     local destination_role=""
                     local current_param=""
+                    local output=""
 
                     # Parse arguments
                     while [[ $# -gt 2 ]]; do
@@ -851,6 +907,10 @@ function gcloud-util() {
                                     return 1
                                 fi
                                 ;;
+                            --output)
+                                output="$4"
+                                shift 2
+                                ;;
                             *)
                                 echo "Error: Unknown option: $3"
                                 echo "Use 'gcloud-util iam merge-roles help' for usage information"
@@ -858,6 +918,11 @@ function gcloud-util() {
                                 ;;
                         esac
                     done
+
+                    # Validate output format if specified
+                    if ! validate_output_format "$output"; then
+                        return 1
+                    fi
 
                     # Validate parameters
                     if [[ ${#roles[@]} -lt 2 ]]; then
@@ -953,7 +1018,7 @@ function gcloud-util() {
                     
                     # Execute the create command
                     echo "Creating role with merged permissions..."
-                    eval "$create_cmd"
+                    format_gcloud_output "$create_cmd" "$output" "name,title,description,stage,includedPermissions:sort=1"
                     
                     if [[ $? -eq 0 ]]; then
                         echo "Successfully created merged role: $destination_role"
@@ -964,257 +1029,27 @@ function gcloud-util() {
                     fi
                     ;;
 
-                "search-roles")
+                "backup")
                     # Show help text if requested
                     if [[ "$3" == "--help" ]] || [[ "$3" == "help" ]]; then
-                        echo "Description:"
-                        echo "  Search for IAM roles across all projects and organization"
-                        echo "  Searches role names, titles, descriptions, and permissions"
+                        echo "GCloud IAM Backup Command"
+                        echo "\nDescription:"
+                        echo "  Creates a backup of IAM configurations"
                         echo "\nUsage:"
-                        echo "  gcloud-util iam search-roles [--find SEARCH_TERM ...] [--find-principal PRINCIPAL] [--name-only]"
-                        echo "\nParameters (at least one required):"
-                        echo "  --find SEARCH_TERM     : Term to search for in roles (can be specified multiple times)"
-                        echo "                          When multiple terms are provided, roles must match ALL terms"
-                        echo "  --find-principal EMAIL : Search for roles assigned to this principal (user or service account)"
+                        echo "  gcloud-util iam backup (--project-id PROJECT_ID | --org-id ORG_ID | --all ORG_ID) --user USER_EMAIL [--output-dir DIR]"
+                        echo "\nRequired Parameters:"
+                        echo "  One of the following must be specified:"
+                        echo "    --project-id PROJECT_ID   : The Google Cloud Project ID"
+                        echo "    --org-id ORG_ID          : The Google Cloud Organization ID"
+                        echo "    --all ORG_ID             : Execute on organization and all its projects"
+                        echo "  And:"
+                        echo "  --user USER_EMAIL     : The email address of the user to backup"
                         echo "\nOptional Parameters:"
-                        echo "  --name-only           : Only search in role names (ignore descriptions and permissions)"
+                        echo "  --output-dir DIR      : Directory to store backup files (default: ./backup_YYYYMMDD_HHMMSS)"
                         echo "\nExamples:"
-                        echo "  gcloud-util iam search-roles --find storage"
-                        echo "  gcloud-util iam search-roles --find storage --find bucket --name-only"
-                        echo "  gcloud-util iam search-roles --find-principal user@example.com"
-                        echo "  gcloud-util iam search-roles --find storage --find-principal user@example.com"
-                        return 0
-                    fi
-
-                    local -a search_terms=()
-                    local name_only=false
-                    local principal=""
-
-                    # Parse arguments
-                    while [[ $# -gt 2 ]]; do
-                        case "$3" in
-                            --find)
-                                if [[ -n "$4" && "$4" != -* ]]; then
-                                    search_terms+=("$4")
-                                    shift 2
-                                else
-                                    echo "Error: --find requires a search term"
-                                    return 1
-                                fi
-                                ;;
-                            --find-principal)
-                                if [[ -n "$4" && "$4" != -* ]]; then
-                                    principal="$4"
-                                    shift 2
-                                else
-                                    echo "Error: --find-principal requires an email address"
-                                    return 1
-                                fi
-                                ;;
-                            --name-only)
-                                name_only=true
-                                shift 1
-                                ;;
-                            *)
-                                echo "Error: Unknown option: $3"
-                                echo "Use 'gcloud-util iam search-roles help' for usage information"
-                                return 1
-                                ;;
-                        esac
-                    done
-
-                    # Validate parameters
-                    if [[ ${#search_terms[@]} -eq 0 && -z "$principal" ]]; then
-                        echo "Error: At least one of --find or --find-principal must be specified"
-                        echo "Use 'gcloud-util iam search-roles help' for usage information"
-                        return 1
-                    fi
-
-                    # Get organization ID
-                    local org_id=$(get_default_org)
-                    if [[ $? -ne 0 ]]; then
-                        return 1
-                    fi
-
-                    echo "\n=== Role Search Results ==="
-                    echo "-------------------------"
-                    if [[ "$name_only" == "true" ]]; then
-                        echo "Search mode: Role names only"
-                    else
-                        echo "Search mode: Full search (names, descriptions, and permissions)"
-                    fi
-                    [[ ${#search_terms[@]} -gt 0 ]] && echo "Search terms: ${search_terms[@]}"
-                    [[ -n "$principal" ]] && echo "Principal: $principal"
-                    
-                    # Function to check if all terms match
-                    function check_all_terms_match() {
-                        local content="$1"
-                        local matched=true
-                        for term in "${search_terms[@]}"; do
-                            if ! echo "$content" | grep -qi "$term"; then
-                                matched=false
-                                break
-                            fi
-                        done
-                        [[ "$matched" == "true" ]]
-                    }
-
-                    # Function to check if principal has the role
-                    function check_principal_has_role() {
-                        local scope_type="$1"  # organizations or projects
-                        local scope_id="$2"    # org ID or project ID
-                        local role_name="$3"   # role to check
-                        local policy_json=""
-                        
-                        if [[ "$scope_type" == "organizations" ]]; then
-                            policy_json=$(eval "gcloud organizations get-iam-policy \"$scope_id\" --format=json")
-                        else
-                            policy_json=$(eval "gcloud projects get-iam-policy \"$scope_id\" --format=json")
-                        fi
-                        
-                        if [[ $? -ne 0 ]]; then
-                            return 1
-                        fi
-                        
-                        # Check if the principal has this role
-                        echo "$policy_json" | \
-                            jq -e --arg role "$role_name" --arg principal "$principal" \
-                            '.bindings[] | select(.role == $role and (.members[] | contains($principal)))' > /dev/null
-                        return $?
-                    }
-                    
-                    # Search organization roles
-                    echo "\nSearching organization $org_id..."
-                    echo "--------------------------------"
-                    local org_roles=$(gcloud iam roles list --organization="$org_id" --format="table[no-heading](name,title,description)")
-                    if [[ -n "$org_roles" ]]; then
-                        echo "$org_roles" | while IFS= read -r role; do
-                            local full_role_name=$(echo "$role" | awk '{print $1}')
-                            local role_name=$(basename "$full_role_name")
-                            local should_show=false
-                            
-                            # Check principal access if specified
-                            if [[ -n "$principal" ]]; then
-                                if check_principal_has_role "organizations" "$org_id" "$full_role_name"; then
-                                    should_show=true
-                                else
-                                    should_show=false
-                                    continue
-                                fi
-                            fi
-                            
-                            # Check search terms if specified
-                            if [[ ${#search_terms[@]} -gt 0 ]]; then
-                                if [[ "$name_only" == "true" ]]; then
-                                    if check_all_terms_match "$full_role_name"; then
-                                        should_show=true
-                                    fi
-                                else
-                                    local role_details=$(gcloud iam roles describe "$role_name" --organization="$org_id" --format="json")
-                                    if check_all_terms_match "$role_details"; then
-                                        should_show=true
-                                    fi
-                                fi
-                            elif [[ -n "$principal" ]]; then
-                                should_show=true
-                            fi
-                            
-                            if [[ "$should_show" == "true" ]]; then
-                                echo "\nRole: $full_role_name"
-                                echo "Location: organizations/$org_id"
-                                if [[ "$name_only" != "true" ]]; then
-                                    local role_details=$(gcloud iam roles describe "$role_name" --organization="$org_id" --format="json")
-                                    echo "Title: $(echo "$role_details" | jq -r '.title // "N/A"')"
-                                    echo "Description: $(echo "$role_details" | jq -r '.description // "N/A"')"
-                                    if [[ ${#search_terms[@]} -gt 0 ]]; then
-                                        echo "Matching permissions:"
-                                        for term in "${search_terms[@]}"; do
-                                            echo "$role_details" | jq -r '.includedPermissions[]' | grep -i "$term" | sed 's/^/  - /' || true
-                                        done
-                                    fi
-                                fi
-                            fi
-                        done
-                    fi
-
-                    # Search project roles
-                    local projects=($(get_org_projects "$org_id" "true"))
-                    for project in $projects; do
-                        echo "\nSearching project $project..."
-                        echo "--------------------------------"
-                        local project_roles=$(gcloud iam roles list --project="$project" --format="table[no-heading](name,title,description)")
-                        if [[ -n "$project_roles" ]]; then
-                            echo "$project_roles" | while IFS= read -r role; do
-                                local full_role_name=$(echo "$role" | awk '{print $1}')
-                                local role_name=$(basename "$full_role_name")
-                                local should_show=false
-                                
-                                # Check principal access if specified
-                                if [[ -n "$principal" ]]; then
-                                    if check_principal_has_role "projects" "$project" "$full_role_name"; then
-                                        should_show=true
-                                    else
-                                        should_show=false
-                                        continue
-                                    fi
-                                fi
-                                
-                                # Check search terms if specified
-                                if [[ ${#search_terms[@]} -gt 0 ]]; then
-                                    if [[ "$name_only" == "true" ]]; then
-                                        if check_all_terms_match "$full_role_name"; then
-                                            should_show=true
-                                        fi
-                                    else
-                                        local role_details=$(gcloud iam roles describe "$role_name" --project="$project" --format="json")
-                                        if check_all_terms_match "$role_details"; then
-                                            should_show=true
-                                        fi
-                                    fi
-                                elif [[ -n "$principal" ]]; then
-                                    should_show=true
-                                fi
-                                
-                                if [[ "$should_show" == "true" ]]; then
-                                    echo "\nRole: $full_role_name"
-                                    echo "Location: projects/$project"
-                                    if [[ "$name_only" != "true" ]]; then
-                                        local role_details=$(gcloud iam roles describe "$role_name" --project="$project" --format="json")
-                                        echo "Title: $(echo "$role_details" | jq -r '.title // "N/A"')"
-                                        echo "Description: $(echo "$role_details" | jq -r '.description // "N/A"')"
-                                        if [[ ${#search_terms[@]} -gt 0 ]]; then
-                                            echo "Matching permissions:"
-                                            for term in "${search_terms[@]}"; do
-                                                echo "$role_details" | jq -r '.includedPermissions[]' | grep -i "$term" | sed 's/^/  - /' || true
-                                            done
-                                        fi
-                                    fi
-                                fi
-                            done
-                        fi
-                    done
-                    ;;
-
-                *)
-                    echo "Error: Unknown IAM subcommand: $subcommand"
-                    echo "Available subcommands: describe-role, describe-user, list-roles, list-users, merge-roles, search-roles, help"
-                    echo "Use 'gcloud-util iam help' for more information"
-                    return 1
-                    ;;
-            esac
-            ;;
-        "backup")
-            # Show backup help if no subcommand provided or help requested
-            if [[ $# -eq 1 ]] || [[ "$2" == "help" ]] || [[ "$2" == "--help" ]]; then
-                show_backup_help
-                return 0
-            fi
-
-            case "$subcommand" in
-                "iam")
-                    # Show help if requested
-                    if [[ "$3" == "--help" ]] || [[ "$3" == "help" ]]; then
-                        show_backup_iam_help
+                        echo "  gcloud-util iam backup --project-id my-project --user user@example.com"
+                        echo "  gcloud-util iam backup --org-id 123456789 --user user@example.com"
+                        echo "  gcloud-util iam backup --all 123456789 --user user@example.com --output-dir /path/to/backup"
                         return 0
                     fi
 
@@ -1254,7 +1089,7 @@ function gcloud-util() {
                                 ;;
                             *)
                                 echo "Error: Unknown option: $3"
-                                echo "Use 'gcloud-util backup iam help' for usage information"
+                                echo "Use 'gcloud-util iam backup help' for usage information"
                                 return 1
                                 ;;
                         esac
@@ -1268,18 +1103,18 @@ function gcloud-util() {
 
                     if [[ $param_count -ne 1 ]]; then
                         echo "Error: Exactly one of --project-id, --org-id, or --all must be specified"
-                        echo "Use 'gcloud-util backup iam help' for usage information"
+                        echo "Use 'gcloud-util iam backup help' for usage information"
                         return 1
                     fi
 
                     if [[ -z "$user" ]]; then
                         echo "Error: --user parameter is required"
-                        echo "Use 'gcloud-util backup iam help' for usage information"
+                        echo "Use 'gcloud-util iam backup help' for usage information"
                         return 1
                     fi
 
                     # Create backup directory
-                    local backup_dir=$(create_backup_dir "backup" "iam/user" "$user" "$output_dir")
+                    local backup_dir=$(create_backup_dir "iam" "user" "$user" "$output_dir")
                     if [[ $? -ne 0 ]]; then
                         return 1
                     fi
@@ -1331,109 +1166,181 @@ function gcloud-util() {
 
                     echo "Backup completed successfully!"
                     echo "Backup location: $backup_dir"
-                    echo "To restore, use: gcloud-util restore --dir $backup_dir"
+                    echo "To restore, use: gcloud-util iam restore --dir $backup_dir"
+                    ;;
+
+                "restore")
+                    # Show help if requested
+                    if [[ "$3" == "--help" ]] || [[ "$3" == "help" ]]; then
+                        echo "GCloud IAM Restore Command"
+                        echo "\nDescription:"
+                        echo "  Restore IAM configurations from backup files"
+                        echo "\nUsage:"
+                        echo "  gcloud-util iam restore (--dir BACKUP_DIR | --file BACKUP_FILE)"
+                        echo "\nRequired Parameters (one of):"
+                        echo "  --dir BACKUP_DIR    : Directory containing backup files"
+                        echo "  --file BACKUP_FILE  : Single backup file to restore from"
+                        echo "\nExamples:"
+                        echo "  gcloud-util iam restore --dir ./backup/iam/user/user_at_example.com_20240105"
+                        echo "  gcloud-util iam restore --file ./backup/project_my-project_roles.json"
+                        return 0
+                    fi
+
+                    local backup_dir=""
+                    local backup_file=""
+
+                    # Parse arguments
+                    while [[ $# -gt 2 ]]; do
+                        case "$3" in
+                            --dir)
+                                backup_dir="$4"
+                                shift 2
+                                ;;
+                            --file)
+                                backup_file="$4"
+                                shift 2
+                                ;;
+                            *)
+                                echo "Error: Unknown option: $3"
+                                echo "Use 'gcloud-util iam restore help' for usage information"
+                                return 1
+                                ;;
+                        esac
+                    done
+
+                    # Validate parameters
+                    if [[ -z "$backup_dir" && -z "$backup_file" ]]; then
+                        echo "Error: Either --dir or --file must be specified"
+                        echo "Use 'gcloud-util iam restore help' for usage information"
+                        return 1
+                    fi
+
+                    if [[ -n "$backup_dir" && -n "$backup_file" ]]; then
+                        echo "Error: Cannot specify both --dir and --file"
+                        echo "Use 'gcloud-util iam restore help' for usage information"
+                        return 1
+                    fi
+
+                    # Handle directory restore
+                    if [[ -n "$backup_dir" ]]; then
+                        if [[ ! -d "$backup_dir" ]]; then
+                            echo "Error: Directory not found: $backup_dir"
+                            return 1
+                        fi
+
+                        # Extract user email from directory name
+                        local user_part=$(basename "$backup_dir" | sed 's/\(.*\)_[0-9]\{8\}_[0-9]\{6\}/\1/')
+                        local user=${user_part/_at_/@}
+
+                        # Get organization ID
+                        local org_id=$(get_default_org)
+                        if [[ $? -ne 0 ]]; then
+                            return 1
+                        fi
+
+                        echo "Restoring permissions for user: $user"
+                        
+                        # Process all backup files in directory
+                        for file in "$backup_dir"/*_roles.json; do
+                            if [[ -f "$file" ]]; then
+                                restore_from_file "$file" "$user" "$org_id"
+                            fi
+                        done
+                    else
+                        # Handle single file restore
+                        if [[ ! -f "$backup_file" ]]; then
+                            echo "Error: File not found: $backup_file"
+                            return 1
+                        fi
+
+                        # Get organization ID if needed
+                        local org_id=""
+                        if [[ "$backup_file" == *"org_roles.json" ]]; then
+                            org_id=$(get_default_org)
+                            if [[ $? -ne 0 ]]; then
+                                return 1
+                            fi
+                        fi
+
+                        # Extract user email from directory path
+                        local dir_name=$(dirname "$backup_file")
+                        local user_part=$(basename "$dir_name" | sed 's/\(.*\)_[0-9]\{8\}_[0-9]\{6\}/\1/')
+                        local user=${user_part/_at_/@}
+
+                        restore_from_file "$backup_file" "$user" "$org_id"
+                    fi
+
+                    echo "Restore completed successfully!"
                     ;;
 
                 *)
-                    echo "Error: Unknown backup subcommand: $subcommand"
-                    echo "Available subcommands: iam, help"
-                    echo "Use 'gcloud-util backup help' for more information"
+                    echo "Error: Unknown IAM subcommand: $subcommand"
+                    echo "Available subcommands: describe-role, describe-user, list-roles, list-users, merge-roles, search-roles, backup, restore, help"
+                    echo "Use 'gcloud-util iam help' for more information"
                     return 1
                     ;;
             esac
             ;;
-        "restore")
-            # Show help if requested
-            if [[ "$1" == "help" ]] || [[ "$1" == "--help" ]]; then
-                show_restore_help
+        "projects")
+            # Show help if no subcommand provided or help requested
+            if [[ $# -eq 1 ]] || [[ "$2" == "help" ]] || [[ "$2" == "--help" ]]; then
+                show_projects_help
                 return 0
             fi
 
-            local backup_dir=""
-            local backup_file=""
-
-            # Parse arguments
-            while [[ $# -gt 1 ]]; do
-                case "$2" in
-                    --dir)
-                        backup_dir="$3"
-                        shift 2
-                        ;;
-                    --file)
-                        backup_file="$3"
-                        shift 2
-                        ;;
-                    *)
-                        echo "Error: Unknown option: $2"
-                        echo "Use 'gcloud-util restore help' for usage information"
-                        return 1
-                        ;;
-                esac
-            done
-
-            # Validate parameters
-            if [[ -z "$backup_dir" && -z "$backup_file" ]]; then
-                echo "Error: Either --dir or --file must be specified"
-                echo "Use 'gcloud-util restore help' for usage information"
-                return 1
-            fi
-
-            if [[ -n "$backup_dir" && -n "$backup_file" ]]; then
-                echo "Error: Cannot specify both --dir and --file"
-                echo "Use 'gcloud-util restore help' for usage information"
-                return 1
-            fi
-
-            # Handle directory restore
-            if [[ -n "$backup_dir" ]]; then
-                if [[ ! -d "$backup_dir" ]]; then
-                    echo "Error: Directory not found: $backup_dir"
-                    return 1
-                fi
-
-                # Extract user email from directory name
-                local user_part=$(basename "$backup_dir" | sed 's/\(.*\)_[0-9]\{8\}_[0-9]\{6\}/\1/')
-                local user=${user_part/_at_/@}
-
-                # Get organization ID
-                local org_id=$(get_default_org)
-                if [[ $? -ne 0 ]]; then
-                    return 1
-                fi
-
-                echo "Restoring permissions for user: $user"
-                
-                # Process all backup files in directory
-                for file in "$backup_dir"/*_roles.json; do
-                    if [[ -f "$file" ]]; then
-                        restore_from_file "$file" "$user" "$org_id"
+            case "$subcommand" in
+                "list")
+                    # Show help if requested
+                    if [[ "$3" == "--help" ]] || [[ "$3" == "help" ]]; then
+                        show_projects_list_help
+                        return 0
                     fi
-                done
-            else
-                # Handle single file restore
-                if [[ ! -f "$backup_file" ]]; then
-                    echo "Error: File not found: $backup_file"
-                    return 1
-                fi
 
-                # Get organization ID if needed
-                local org_id=""
-                if [[ "$backup_file" == *"org_roles.json" ]]; then
-                    org_id=$(get_default_org)
-                    if [[ $? -ne 0 ]]; then
+                    local output=""
+                    local all_flag=""
+                    
+                    # Parse arguments
+                    while [[ $# -gt 2 ]]; do
+                        case "$3" in
+                            --output)
+                                output="$4"
+                                shift 2
+                                ;;
+                            --all)
+                                all_flag="true"
+                                shift 1
+                                ;;
+                            *)
+                                echo "Error: Unknown option: $3"
+                                echo "Use 'gcloud-util projects list help' for usage information"
+                                return 1
+                                ;;
+                        esac
+                    done
+
+                    # Validate output format if specified
+                    if ! validate_output_format "$output"; then
                         return 1
                     fi
-                fi
 
-                # Extract user email from directory path
-                local dir_name=$(dirname "$backup_file")
-                local user_part=$(basename "$dir_name" | sed 's/\(.*\)_[0-9]\{8\}_[0-9]\{6\}/\1/')
-                local user=${user_part/_at_/@}
+                    # Execute the command with or without filter
+                    local cmd
+                    if [[ -n "$all_flag" ]]; then
+                        cmd="gcloud projects list"
+                    else
+                        cmd="gcloud projects list --filter=\"NOT projectId:(sys-*)\""
+                    fi
+                    
+                    format_gcloud_output "$cmd" "$output" "projectId,name,projectNumber,lifecycleState"
+                    ;;
 
-                restore_from_file "$backup_file" "$user" "$org_id"
-            fi
-
-            echo "Restore completed successfully!"
+                *)
+                    echo "Error: Unknown projects subcommand: $subcommand"
+                    echo "Available subcommands: list, help"
+                    echo "Use 'gcloud-util projects help' for more information"
+                    return 1
+                    ;;
+            esac
             ;;
         *)
             echo "Error: Unknown command: $command"
@@ -1473,4 +1380,146 @@ function show_projects_list_help() {
     echo "  gcloud-util projects list --output json"
     echo "  gcloud-util projects list --all --output yaml"
 }
+
+# Auto-completion setup
+function _gcloud-util() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    # Define the main commands
+    local -a commands=(
+        'iam:IAM role and permission management'
+        'projects:GCP projects management'
+        'help:Show help message'
+    )
+
+    # Define IAM subcommands
+    local -a iam_subcommands=(
+        'describe-role:Get detailed information about a specific IAM role'
+        'describe-user:Get detailed information about a specific IAM user'
+        'list-roles:List all custom IAM roles in a project or organization'
+        'list-users:List all IAM users in a project or organization'
+        'merge-roles:Merge multiple IAM roles into a new role'
+        'backup:Backup IAM configurations'
+        'restore:Restore IAM configurations from backup'
+        'help:Show IAM help message'
+    )
+
+    # Define projects subcommands
+    local -a projects_subcommands=(
+        'list:List GCP projects'
+        'help:Show projects help message'
+    )
+
+    # Define common options
+    local -a common_options=(
+        '--project-id[The Google Cloud Project ID]:project id'
+        '--org-id[The Google Cloud Organization ID]:org id'
+        '--all[Execute on organization and all its projects]'
+        '--output[Output format (table|json|yaml|text|csv)]:format:(table json yaml text csv)'
+    )
+
+    # Define search options
+    local -a search_options=(
+        '--search[Search term to filter results]:term'
+    )
+
+    # Define role options
+    local -a role_options=(
+        '--role[The name of the role]:role'
+    )
+
+    # Define user options
+    local -a user_options=(
+        '--user[The email address of the user]:email'
+    )
+
+    # Define backup options
+    local -a backup_options=(
+        '--output-dir[Directory to store backup files]:directory:_files -/'
+    )
+
+    # Define restore options
+    local -a restore_options=(
+        '--dir[Directory containing backup files]:directory:_files -/'
+        '--file[Single backup file to restore from]:file:_files'
+    )
+
+    # Main completion logic
+    _arguments -C \
+        '1: :->command' \
+        '2: :->subcommand' \
+        '*: :->args' && return 0
+
+    case $state in
+        command)
+            _describe -t commands 'gcloud-util commands' commands
+            ;;
+        subcommand)
+            case $words[2] in
+                iam)
+                    _describe -t iam_subcommands 'iam subcommands' iam_subcommands
+                    ;;
+                projects)
+                    _describe -t projects_subcommands 'projects subcommands' projects_subcommands
+                    ;;
+            esac
+            ;;
+        args)
+            case $words[2] in
+                iam)
+                    case $words[3] in
+                        describe-role)
+                            _arguments \
+                                $common_options \
+                                $role_options
+                            ;;
+                        describe-user)
+                            _arguments \
+                                $common_options \
+                                $user_options
+                            ;;
+                        list-roles)
+                            _arguments \
+                                $common_options \
+                                $search_options
+                            ;;
+                        list-users)
+                            _arguments \
+                                $common_options \
+                                $search_options
+                            ;;
+                        merge-roles)
+                            _arguments \
+                                '--role[Source role path]:role path' \
+                                '--destination-role[Destination role path]:role path' \
+                                $common_options
+                            ;;
+                        backup)
+                            _arguments \
+                                $common_options \
+                                $user_options \
+                                $backup_options
+                            ;;
+                        restore)
+                            _arguments \
+                                $restore_options
+                            ;;
+                    esac
+                    ;;
+                projects)
+                    case $words[3] in
+                        list)
+                            _arguments \
+                                $common_options
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+# Register the completion function
+compdef _gcloud-util gcloud-util
 
