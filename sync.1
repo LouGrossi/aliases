@@ -1,0 +1,178 @@
+.TH SYNC 1 "$(date +"%B %Y")" "sync 1.0.0" "User Commands"
+.SH NAME
+sync \- Synchronize directories between hosts using Unison
+.SH SYNOPSIS
+.B sync
+[\fIOPTIONS\fR]
+\fICOMMAND\fR
+.br
+.B sync bootstrap
+\fIREMOTE_IP\fR
+.br
+.B sync config
+\fISUBCOMMAND\fR
+.SH DESCRIPTION
+.B sync
+is a utility for maintaining consistent directory structures across multiple hosts using Unison as the synchronization backend. It supports multiple remote hosts, various synchronization targets, and provides tools for configuration management and remote host bootstrapping.
+.SH COMMANDS
+.SS "Synchronization Commands:"
+.TP
+.B git
+Synchronize git repositories between hosts
+.TP
+.B aliases
+Synchronize shell aliases between hosts
+.TP
+.B dotfiles
+Synchronize dotfiles between hosts
+.TP
+.B projects
+Synchronize projects directory between hosts
+.TP
+.B documents
+Synchronize documents between hosts
+.TP
+.B status
+Display connection status for all configured hosts
+.SS "Bootstrap Commands:"
+.TP
+.BI "bootstrap " IP
+Set up a new remote host with required dependencies. Installs Unison and creates necessary directories.
+.SS "Configuration Commands:"
+.TP
+.B config get
+Show current config file location
+.TP
+.BI "config set " PATH
+Set config file location to PATH
+.TP
+.BI "config init " "[PATH]"
+Create default config file at PATH (or default location)
+.SH OPTIONS
+.SS "Debug Options:"
+.TP
+.B \-\-debug
+Enable verbose debug output
+.TP
+.B \-\-dry\-run
+Show what would be synced without making changes
+.TP
+.B \-\-force
+Force sync even if versions don't match
+.SS "Information Options:"
+.TP
+.B \-\-version
+Show version information
+.TP
+.B \-\-help, \-h
+Display help message
+.SH CONFIGURATION
+Configuration is managed through a central configuration file, which can be located at different paths based on user preference.
+.SS "Default Location:"
+.I $XDG_CONFIG_HOME/sync/config
+or
+.I $HOME/.config/sync/config
+.PP
+The configuration file contains settings for:
+.IP \[bu] 2
+Remote user and IP addresses
+.IP \[bu]
+Path configurations for sync targets
+.IP \[bu]
+Unison settings and preferences
+.IP \[bu]
+Directory locations and mappings
+.IP \[bu]
+Ignore patterns and rules
+.SH FILES
+.TP
+.I ~/.config/sync/config
+Default configuration file location
+.TP
+.I ~/.config/sync/ignore
+Default ignore patterns file
+.TP
+.I ~/.unison/
+Directory for Unison preference files
+.SH ENVIRONMENT
+.TP
+.B XDG_CONFIG_HOME
+Base directory for configuration files (default: ~/.config)
+.TP
+.B HOME
+User's home directory, used for default paths
+.SH EXAMPLES
+.TP
+Initialize Configuration:
+.B sync config init
+.br
+Creates default configuration in standard location
+.TP
+Set Custom Configuration:
+.B sync config set ~/custom/sync.conf
+.br
+Changes configuration file location
+.TP
+Bootstrap New Host:
+.B sync bootstrap 192.168.1.10
+.br
+Prepares a new host for synchronization
+.TP
+Check Host Status:
+.B sync status
+.br
+Displays connection status for all configured hosts
+.TP
+Synchronize Repositories:
+.B sync git
+.br
+Syncs git repositories with first available host
+.TP
+Test Synchronization:
+.B sync \-\-dry\-run documents
+.br
+Shows what would be synchronized without making changes
+.TP
+Debug Synchronization:
+.B sync \-\-debug git
+.br
+Runs with verbose output for troubleshooting
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+General error (invalid options, connection failed, etc.)
+.TP
+.B 2
+Configuration error
+.SH NOTES
+.SS Requirements:
+.IP \[bu] 2
+All paths must be absolute
+.IP \[bu]
+SSH key-based authentication required
+.IP \[bu]
+Unison must be installed on all hosts
+.IP \[bu]
+Same version of Unison required on all hosts
+.IP \[bu]
+Bootstrap requires sudo access on remote host
+.SS "Configuration Priority:"
+.IP 1. 4
+Command line options
+.IP 2.
+Configuration file
+.IP 3.
+Default values
+.SH AUTHOR
+Written by Lou Grossi <lou@ncdlabs.com>
+.SH "REPORTING BUGS"
+Report bugs to: https://github.com/ncdlabs/sync/issues
+.SH COPYRIGHT
+Copyright \(co 2024 ncdLabs. License MIT.
+.SH "SEE ALSO"
+.BR unison (1),
+.BR ssh (1),
+.BR ssh-copy-id (1) 

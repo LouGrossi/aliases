@@ -1,0 +1,25 @@
+alias pkg-wp-plugin='function _pkg_wp_plugin() {
+    local SOURCE_DIR="$1"
+    local FILENAME="$2"
+    
+    if [[ -z "$SOURCE_DIR" || -z "$FILENAME" ]]; then
+        echo "Usage: pkg-wp-plugin <source_dir> <filename>"
+        return 1
+    fi
+
+    if [[ ! -d "$SOURCE_DIR" ]]; then
+        echo "Error: Source directory '$SOURCE_DIR' does not exist."
+        return 1
+    fi
+
+    # Create a temporary directory for packaging
+    TEMP_DIR=$(mktemp -d)
+    cp -r "$SOURCE_DIR"/* "$TEMP_DIR/"
+
+    # Create the ZIP file
+    zip -r "$FILENAME" -j "$TEMP_DIR"/*
+
+    # Clean up
+    rm -rf "$TEMP_DIR"
+    echo "Packaged plugin into $FILENAME"
+}; _pkg_wp_plugin'
