@@ -3,6 +3,74 @@
 # Author: Lou Grossi
 # Company: ncdLabs
 # Description: GCloud utility functions for managing GCP resources
+#
+# FEATURES
+# ========
+#
+# IAM Management
+# -------------
+# 1. Role Management:
+#    - list-roles: List custom IAM roles in projects or organization
+#    - describe-role: Get detailed role information including permissions
+#    - search-roles: Search for roles across all projects and organization
+#      * Search by terms in role names, descriptions, and permissions
+#      * Search by principal (find roles assigned to user/service account)
+#      * Multiple search terms with AND logic
+#      * Name-only search option
+#    - merge-roles: Combine multiple roles into a new custom role
+#      * Merge roles from different projects/organization
+#      * Automatic permission deduplication
+#      * Verification screen before creation
+#
+# 2. User Management:
+#    - list-users: List all users and service accounts
+#    - describe-user: Get detailed user role assignments
+#
+# Backup & Restore
+# ---------------
+# 1. Backup Features:
+#    - Backup IAM configurations
+#    - Support for project and organization scope
+#    - Hierarchical backup structure
+#    - Timestamp-based versioning
+#
+# 2. Restore Features:
+#    - Restore from backup files
+#    - Support for single file or directory restore
+#    - Automatic organization detection
+#
+# Project Management
+# -----------------
+# 1. Project Features:
+#    - list: List all GCP projects
+#    - Filter system projects
+#    - Custom output formats
+#
+# General Features
+# ---------------
+# 1. Scope Support:
+#    - Project-level operations
+#    - Organization-level operations
+#    - All-scope operations (org + all projects)
+#
+# 2. Output Formats:
+#    - Table (default with ASCII borders)
+#    - JSON
+#    - YAML
+#    - Text
+#    - CSV
+#
+# 3. Safety Features:
+#    - Confirmation prompts for destructive operations
+#    - Detailed verification screens
+#    - Error handling and validation
+#
+# 4. Help System:
+#    - Command-specific help
+#    - Subcommand help
+#    - Usage examples
+#    - Parameter descriptions
+#
 
 # Source the output library
 SCRIPT_DIR="${0:A:h}"
