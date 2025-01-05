@@ -13,15 +13,13 @@ function show_main_help() {
     echo "GCloud Utility Tool - IAM Management"
     echo "\nAvailable commands:"
     echo "  iam             - IAM role and permission management"
+    echo "  projects        - GCP projects management"
     echo "  help           - Show this help message"
     echo "\nUsage:"
     echo "  gcloud-util <command> [subcommand] [options]"
     echo "\nGet detailed help:"
     echo "  gcloud-util help           - Show this help"
     echo "  gcloud-util <command> help - Show help for a specific command"
-    echo "\nExamples:"
-    echo "  gcloud-util iam help"
-    echo "  gcloud-util iam describe-role --help"
 }
 
 # Function to show IAM help
@@ -62,8 +60,13 @@ function get_default_org() {
 # Helper function to get all projects in an organization
 function get_org_projects() {
     local org_id=$1
+    local all_flag=$2
     # Get all projects in the organization, extract just the project IDs
-    gcloud projects list --filter="parent.id=$org_id" --format="value(projectId)"
+    if [[ -n "$all_flag" ]]; then
+        gcloud projects list --format="value(projectId)"
+    else
+        gcloud projects list --filter="NOT projectId:(sys-*)" --format="value(projectId)"
+    fi
 }
 
 # Helper function to execute command across org and projects
@@ -72,6 +75,7 @@ function execute_all_scope() {
     local cmd_type=$2
     local output=$3
     local extra_args=$4
+    local all_flag=$5
 
     echo "Executing on organization $org_id..."
     echo "----------------------------------------"
@@ -91,7 +95,7 @@ function execute_all_scope() {
     esac
 
     # Get all projects and execute on each
-    local projects=($(get_org_projects "$org_id"))
+    local projects=($(get_org_projects "$org_id" "$all_flag"))
     for project in $projects; do
         echo "\nExecuting on project $project..."
         echo "----------------------------------------"
@@ -124,6 +128,70 @@ function gcloud-util() {
     fi
 
     case "$command" in
+        "projects")
+            # Show help if no subcommand provided or help requested
+            if [[ $# -eq 1 ]] || [[ "$2" == "help" ]] || [[ "$2" == "--help" ]]; then
+                show_projects_help
+                return 0
+            fi
+
+            case "$subcommand" in
+                "list")
+                    # Show help if requested
+                    if [[ "$3" == "--help" ]] || [[ "$3" == "help" ]]; then
+                        show_projects_list_help
+                        return 0
+                    fi
+
+                    local output=""
+                    local all_flag=""
+                    
+                    # Parse arguments
+                    while [[ $# -gt 2 ]]; do
+                        case "$3" in
+                            --output)
+                                output="$4"
+                                shift 2
+                                ;;
+                            --all)
+                                all_flag="true"
+                                shift 1
+                                ;;
+                            *)
+                                echo "Error: Unknown option: $3"
+                                echo "Use 'gcloud-util projects list help' for usage information"
+                                return 1
+                                ;;
+                        esac
+                    done
+
+                    # Validate output format if specified
+                    if ! validate_output_format "$output"; then
+                        return 1
+                    fi
+
+                    # Execute the command with or without filter
+                    local cmd
+                    if [[ -n "$all_flag" ]]; then
+                        cmd="gcloud projects list"
+                    else
+                        cmd="gcloud projects list --filter=\"NOT projectId:(sys-*)\""
+                    fi
+                    if [[ -n "$output" ]]; then
+                        format_gcloud_output "$cmd" "$output" "projectId,name,projectNumber"
+                    else
+                        format_gcloud_output "$cmd" "table" "projectId,name,projectNumber"
+                    fi
+                    ;;
+
+                *)
+                    echo "Error: Unknown projects subcommand: $subcommand"
+                    echo "Available subcommands: list, help"
+                    echo "Use 'gcloud-util projects help' for more information"
+                    return 1
+                    ;;
+            esac
+            ;;
         "iam")
             # Show IAM help if no subcommand provided or help requested
             if [[ $# -eq 1 ]] || [[ "$2" == "help" ]] || [[ "$2" == "--help" ]]; then
@@ -230,7 +298,7 @@ function gcloud-util() {
                                 return 1
                             fi
                         fi
-                        execute_all_scope "$org_id" "describe-role" "$output" "$role"
+                        execute_all_scope "$org_id" "describe-role" "$output" "$role" "true"
                     else
                         local cmd=""
                         if [[ -n "$project" ]]; then
@@ -421,7 +489,7 @@ function gcloud-util() {
                                 return 1
                             fi
                         fi
-                        execute_all_scope "$org_id" "list-users" "$output"
+                        execute_all_scope "$org_id" "list-users" "$output" "" "true"
                     else
                         local cmd=""
                         if [[ -n "$project" ]]; then
@@ -531,7 +599,7 @@ function gcloud-util() {
                                 return 1
                             fi
                         fi
-                        execute_all_scope "$org_id" "describe-user" "$output" "$user"
+                        execute_all_scope "$org_id" "describe-user" "$output" "$user" "true"
                     else
                         local cmd=""
                         if [[ -n "$project" ]]; then
@@ -553,9 +621,39 @@ function gcloud-util() {
             ;;
         *)
             echo "Error: Unknown command: $command"
-            echo "Available commands: iam, help"
+            echo "Available commands: iam, projects, help"
             echo "Use 'gcloud-util help' for more information"
             return 1
             ;;
     esac
+}
+
+# Add new function to show projects help
+function show_projects_help() {
+    echo "GCloud Projects Management Commands"
+    echo "\nAvailable subcommands:"
+    echo "  list          - List GCP projects"
+    echo "  help          - Show this help message"
+    echo "\nUsage:"
+    echo "  gcloud-util projects <subcommand> [options]"
+    echo "\nGet detailed help:"
+    echo "  gcloud-util projects help                - Show this help"
+    echo "  gcloud-util projects <subcommand> --help - Show help for a specific subcommand"
+}
+
+# Add new function for projects list help
+function show_projects_list_help() {
+    echo "GCloud Projects List Command"
+    echo "\nDescription:"
+    echo "  Lists GCP projects (by default excludes system projects starting with sys-*)"
+    echo "\nUsage:"
+    echo "  gcloud-util projects list [--all] [--output FORMAT]"
+    echo "\nOptional Parameters:"
+    echo "  --all            : Include all projects (including sys-* projects)"
+    add_output_format_help
+    echo "\nExamples:"
+    echo "  gcloud-util projects list"
+    echo "  gcloud-util projects list --all"
+    echo "  gcloud-util projects list --output json"
+    echo "  gcloud-util projects list --all --output yaml"
 }
