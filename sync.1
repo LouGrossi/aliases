@@ -1,2 +1,105 @@
-.TH SYNC 1 "$(date +"%B %Y")" "sync 1.0.0" "User Commands"
-# ... rest of existing man page content ...
+.TH SYNC 1 "March 2024" "sync 1.0.0" "User Commands"
+
+.SH NAME
+sync \- Synchronize directories between hosts using Unison
+
+.SH SYNOPSIS
+sync [options] <command>
+.br
+sync bootstrap [localhost|REMOTE_IP]
+.br
+sync config [get|set|init] [path]
+
+.SH DESCRIPTION
+Synchronize directories between hosts using Unison. This tool provides
+a simple interface for managing file synchronization across multiple
+machines.
+
+.SH COMMANDS
+.SS Built-in commands:
+.IP "    bootstrap" 16
+Configure local or remote system for sync
+.IP "    config" 16
+Manage sync configuration
+.IP "    status" 16
+Show synchronization status
+
+.SS User-defined commands from config:
+Commands are loaded from your configuration file. Run 'sync config init' to create one.
+
+.SH OPTIONS
+.IP "    --help, -h" 24
+Show this help message
+.IP "    --version" 24
+Show version information
+.IP "    --debug" 24
+Enable debug output
+.IP "    --force" 24
+Force synchronization without confirmation
+.IP "    --dry-run" 24
+Show what would be done without making changes
+
+.IP "    --user=USER" 24
+Override remote username for this run
+.IP "    --ip=IP" 24
+Override remote host IP/hostname for this run
+.IP "    --unison-path=PATH" 24
+Override unison executable path
+.IP "    --pref-dir=DIR" 24
+Override unison preferences directory
+.IP "    --ignore-file=FILE" 24
+Override ignore patterns file
+.IP "    --config=FILE" 24
+Use alternate config file
+
+.SH FILES
+.IP "    ~/.config/sync/config" 32
+Default configuration file
+.IP "    ~/.config/sync/ignore" 32
+Default ignore patterns
+.IP "    ~/.unison/" 32
+Unison state and profiles
+
+.SH EXAMPLES
+.IP "    sync config init" 32
+Create default configuration
+.IP "    sync bootstrap localhost" 32
+Configure local machine
+.IP "    sync git" 32
+Run the 'git' sync command
+.IP "    sync --dry-run shell" 32
+Show what 'shell' would sync
+
+.SH ENVIRONMENT
+.TP
+.B UNISON_PATH
+Path to unison executable (default: /usr/bin/unison)
+.TP
+.B SYNC_CONFIG
+Path to sync configuration file
+.TP
+.B SYNC_IGNORE_FILE
+Path to ignore patterns file
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+General error
+.TP
+.B 2
+Configuration error
+.TP
+.B 3
+Network error
+
+.SH AUTHOR
+Written by Lou Grossi (ncdLabs)
+
+.SH REPORTING BUGS
+Report bugs to: https://github.com/ncdlabs/sync/issues
+
+.SH COPYRIGHT
+Copyright © 2024 ncdLabs. License MIT.

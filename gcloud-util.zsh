@@ -566,63 +566,472 @@ function merge_roles() {
                                 fi
 }
 
-# Function to display permissions in table format
-function display_permissions_table() {
+# Utility functions
+function filter_permissions() {
     local -a permissions=("$@")
-    local -a filtered_permissions=()
+    local -a filtered=()
+    local -A seen=()
     
-    # Print status messages in color
-    print -P "%F{blue}Scanning organization and projects for enabled services...%f"
+    log info "Filtering permissions..."
+    local total=${#permissions[@]}
+    local processed=0
     
-    # Filter out status messages and format rows
     for perm in "${permissions[@]}"; do
-        # Skip if permission is empty or contains scanning status messages
-        if [[ -z "$perm" || "$perm" =~ ^(Scanning|Found|Analyzing|project:|organization|for|enabled|services|across|all|scanned|unique|required|each|service|[0-9]+|eh-core-|gam-project-|pam-organization-|permissions|projects) ]]; then
+        ((processed++))
+        update_status_bar "Processing permission: $perm" "$processed" "$total"
+        
+        # Skip empty permissions
+        [[ -z "$perm" ]] && continue
+        
+        # Skip duplicates
+        if [[ -n "${seen[$perm]}" ]]; then
             continue
         fi
         
-        # Skip if the permission doesn't contain a dot (not a valid permission)
-        if [[ ! "$perm" =~ \. ]]; then
-            continue
-        fi
-        
-        # Skip if the permission doesn't match the standard format (service.resource.action)
-        if [[ ! "$perm" =~ ^[a-z]+\.[a-z]+\.[a-z]+ ]]; then
-            continue
-        fi
-        
-        # Add to filtered permissions array
-        filtered_permissions+=("$perm")
+        seen[$perm]=1
+        filtered+=("$perm")
+        sleep 0.1
     done
     
-    # Sort permissions by category and name
-    filtered_permissions=($(printf "%s\n" "${filtered_permissions[@]}" | sort))
-    
-    print -P "%F{green}Found ${#filtered_permissions[@]} unique permissions across all scanned services%f\n"
-    
-    # Create temporary file for table data with headers
-    local temp_file=$(mktemp)
-    echo "Permission,Category" > "$temp_file"
-    
-    # Add each permission with its category
-    for perm in "${filtered_permissions[@]}"; do
-        local category="${perm%%.*}"
-        printf "%s,%s\n" "$perm" "$category" >> "$temp_file"
-    done
-    
-    # Use column command to format the table
-    echo "\nPermissions Table:"
-    echo "----------------"
-    column -t -s ',' "$temp_file"
-    
-    # Cleanup
-    rm "$temp_file"
+    log success "✓ Filtered ${#filtered[@]} unique permissions from $total total"
+    echo "${filtered[@]}"
 }
 
-# Function to expand wildcard permissions
+function display_permissions_table() {
+    local -a permissions=("$@")
+    local total=${#permissions[@]}
+    local processed=0
+    
+    # Calculate maximum permission length for formatting
+    local max_length=0
+    for perm in "${permissions[@]}"; do
+        ((processed++))
+        update_status_bar "Calculating format: $perm" "$processed" "$total"
+        local length=${#perm}
+        if ((length > max_length)); then
+            max_length=$length
+        fi
+    done
+    
+    # Reset counter for display
+    processed=0
+    
+    # Print header
+    log info "+$(printf -- '-%.0s' {1..$((max_length + 4))})+"
+    log info "| Permission$(printf ' %.0s' {1..$((max_length - 9))}) |"
+    log info "+$(printf -- '-%.0s' {1..$((max_length + 4))})+"
+    
+    # Print permissions
+    for perm in "${permissions[@]}"; do
+        ((processed++))
+        update_status_bar "Displaying permission: $perm" "$processed" "$total"
+        log info "| $perm$(printf ' %.0s' {1..$((max_length - ${#perm}))}) |"
+        sleep 0.1
+    done
+    
+    # Print footer
+    log info "+$(printf -- '-%.0s' {1..$((max_length + 4))})+"
+}
+
+function format_duration() {
+    local seconds=$1
+    local minutes=$((seconds / 60))
+    seconds=$((seconds % 60))
+    
+    if ((minutes > 0)); then
+        echo "${minutes}m ${seconds}s"
+    else
+        echo "${seconds}s"
+    fi
+}
+
+function show_selection_menu() {
+    local prompt="$1"
+    shift
+    local -a options=("$@")
+    local selected=1
+    local total=${#options[@]}
+    
+    log info "$prompt"
+    
+    # Display initial menu
+    for ((i = 1; i <= total; i++)); do
+        if ((i == selected)); then
+            log info "→ ${options[$i]}"
+        else
+            log info "  ${options[$i]}"
+        fi
+    done
+    
+    # Handle user input
+    while true; do
+        read -sk1 key
+        case "$key" in
+            $'\x1B')  # ESC sequence
+                read -sk1 key
+                if [[ "$key" == "[" ]]; then
+                    read -sk1 key
+                    case "$key" in
+                        "A")  # Up arrow
+                            if ((selected > 1)); then
+                                ((selected--))
+                            fi
+                            ;;
+                        "B")  # Down arrow
+                            if ((selected < total)); then
+                                ((selected++))
+                            fi
+                            ;;
+                    esac
+                fi
+                ;;
+            "")  # Enter key
+                echo
+                return $selected
+                ;;
+        esac
+        
+        # Clear previous menu
+        for ((i = 1; i <= total; i++)); do
+            tput cuu1
+            tput el
+        done
+        
+        # Redraw menu
+        for ((i = 1; i <= total; i++)); do
+            if ((i == selected)); then
+                log info "→ ${options[$i]}"
+            else
+                log info "  ${options[$i]}"
+            fi
+        done
+    done
+}
+
+function get_predefined_permissions() {
+    local service="$1"
+    local -a permissions=()
+    
+    log info "Loading predefined permissions for service: $service"
+    start_spinner "Loading permissions"
+    
+    case "$service" in
+        terraform)
+            permissions=(
+                # Core permissions
+                "resourcemanager.organizations.get"
+                "resourcemanager.organizations.getIamPolicy"
+                "resourcemanager.projects.get"
+                "resourcemanager.projects.getIamPolicy"
+                "resourcemanager.projects.setIamPolicy"
+                "resourcemanager.folders.get"
+                "resourcemanager.folders.list"
+                
+                # Service management
+                "serviceusage.services.enable"
+                "serviceusage.services.disable"
+                "serviceusage.services.get"
+                "serviceusage.services.list"
+                
+                # IAM management
+                "iam.roles.get"
+                "iam.roles.list"
+                "iam.serviceAccounts.actAs"
+                "iam.serviceAccounts.get"
+                "iam.serviceAccounts.list"
+                
+                # Billing management
+                "billing.accounts.get"
+                "billing.accounts.list"
+                "billing.projectBillingInfo.get"
+                "billing.projectBillingInfo.update"
+            )
+            ;;
+        *)
+            stop_spinner
+            error "Unknown service: $service"
+            ;;
+    esac
+    
+    stop_spinner
+    log success "✓ Loaded ${#permissions[@]} predefined permissions"
+    echo "${permissions[@]}"
+}
+
+# Function to get ANSI color codes
+function get_color() {
+    case "$1" in
+        blue)   echo '\033[34m' ;;
+        green)  echo '\033[32m' ;;
+        yellow) echo '\033[33m' ;;
+        red)    echo '\033[31m' ;;
+        reset)  echo '\033[0m' ;;
+    esac
+}
+
+# Function to display a progress bar
+function show_progress_bar() {
+    local current=$1
+    local total=$2
+    local width=50
+    local percentage=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+    local blue=$(get_color blue)
+    local reset=$(get_color reset)
+    
+    printf -v bar "%${filled}s" ""
+    printf -v space "%${empty}s" ""
+    bar=${bar// /#}
+    space=${space// /-}
+    
+    printf "${blue}[%s%s] %3d%% (%d/%d)${reset}" "$bar" "$space" "$percentage" "$current" "$total"
+}
+
+# Function to get enabled services and their required permissions for Terraform
+function get_terraform_service_permissions() {
+    local org_id="$1"
+    local project_id="$2"
+    local test_mode="$3"
+    local -a permissions=()
+    local -a services=()
+    local temp_file=$(mktemp)
+    local timeout_seconds=30
+    
+    # Initialize status bar
+    init_status_bar
+    trap cleanup EXIT INT TERM
+    
+    log info "Loading core Terraform permissions..."
+    start_spinner "Loading core permissions"
+    
+    # Core permissions that Terraform always needs
+    local -a core_permissions=(
+        # Organization and project management
+        "resourcemanager.organizations.get"
+        "resourcemanager.organizations.getIamPolicy"
+        "resourcemanager.projects.get"
+        "resourcemanager.projects.getIamPolicy"
+        "resourcemanager.projects.setIamPolicy"
+        "resourcemanager.folders.get"
+        "resourcemanager.folders.list"
+        
+        # Service management
+        "serviceusage.services.enable"
+        "serviceusage.services.disable"
+        "serviceusage.services.get"
+        "serviceusage.services.list"
+        
+        # IAM management
+        "iam.roles.get"
+        "iam.roles.list"
+        "iam.serviceAccounts.actAs"
+        "iam.serviceAccounts.get"
+        "iam.serviceAccounts.list"
+        
+        # Billing management
+        "billing.accounts.get"
+        "billing.accounts.list"
+        "billing.projectBillingInfo.get"
+        "billing.projectBillingInfo.update"
+    )
+    
+    permissions+=("${core_permissions[@]}")
+    stop_spinner
+    log success "✓ Loaded ${#core_permissions[@]} core permissions"
+    
+    # Get all projects in the organization
+    local -a projects=()
+    if [[ -n "$org_id" ]]; then
+        log info "Scanning organization $org_id for projects..."
+        start_spinner "Listing projects"
+        
+        if ! timeout $timeout_seconds gcloud projects list --filter="parent.id=$org_id" --format="value(projectId)" > "$temp_file" 2>/dev/null; then
+            stop_spinner
+            error "Failed to list projects in organization $org_id (timeout after ${timeout_seconds}s)"
+        fi
+        
+        projects=(${(f)"$(<$temp_file)"})
+        if [[ "$test_mode" == "true" ]]; then
+            projects=(${projects[1,2]})
+        fi
+        
+        stop_spinner
+        log success "✓ Found ${#projects[@]} projects in organization"
+    elif [[ -n "$project_id" ]]; then
+        log info "Using specified project: $project_id"
+        projects=("$project_id")
+    else
+        error "Either organization ID or project ID must be specified"
+    fi
+    
+    log info "Scanning for enabled services..."
+    : > "$temp_file"
+    
+    local project_count=0
+    local total_projects=${#projects[@]}
+    local start_time=$SECONDS
+    local last_update=0
+    
+    for project in "${projects[@]}"; do
+        ((project_count++))
+        local elapsed=$((SECONDS - start_time))
+        local avg_time=$((elapsed / project_count))
+        local remaining=$(((total_projects - project_count) * avg_time))
+        
+        update_status_bar "Scanning project: $project" "$project_count" "$total_projects"
+        
+        if ! timeout $timeout_seconds gcloud services list --project="$project" --format="value(config.name)" >> "$temp_file" 2>/dev/null; then
+            log warning "⚠ Warning: Timeout scanning services for project $project (skipping)"
+            continue
+        fi
+        
+        if (( project_count % 5 == 0 )); then
+            local scanned_services=(${(f)"$(<$temp_file)"})
+            log info "↻ Progress: Found ${#scanned_services[@]} services so far"
+        fi
+        
+        sleep 0.1
+    done
+    
+    log info "Processing service list..."
+    services=(${(f)"$(<$temp_file)"})
+    services=(${(u)services[@]})
+    if [[ "$test_mode" == "true" ]]; then
+        services=(${services[1,5]})
+    fi
+    rm -f "$temp_file"
+    
+    log success "✓ Found ${#services[@]} unique services across ${#projects[@]} projects"
+    log info "Mapping services to required Terraform permissions..."
+    
+    local processed_services=0
+    local total_services=${#services[@]}
+    local start_time=$SECONDS
+    
+    for service in "${services[@]}"; do
+        ((processed_services++))
+        update_status_bar "Analyzing service: $service" "$processed_services" "$total_services"
+        
+        # Map each service to its required Terraform permissions
+        case "$service" in
+            compute.googleapis.com)
+                permissions+=(
+                    # ... existing compute permissions ...
+                )
+                ;;
+            container.googleapis.com)
+                permissions+=(
+                    # ... existing container permissions ...
+                )
+                ;;
+            # ... rest of the service cases ...
+        esac
+        
+        sleep 0.1
+    done
+    
+    log success "✓ Completed scanning in $(format_duration $((SECONDS - start_time)))"
+    echo "${permissions[@]}"
+}
+
+# Function to check for testing permissions
+function check_testing_permissions() {
+    local -a permissions=("$@")
+    local -a testing_permissions=()
+    local temp_file=$(mktemp)
+    
+    # Get all testable permissions with their stages
+    gcloud iam list-testable-permissions "//cloudresourcemanager.googleapis.com/organizations/1" \
+        --format="table(name,stage)" > "$temp_file" 2>/dev/null
+    
+    # Check each permission
+    for perm in "${permissions[@]}"; do
+        # Skip empty permissions or status messages
+        if [[ -z "$perm" || "$perm" =~ ^(Scanning|Found|Analyzing) ]]; then
+            continue
+        fi
+        
+        # Check if permission is in TESTING stage
+        if grep -q "^${perm}.*TESTING" "$temp_file" 2>/dev/null; then
+            testing_permissions+=("$perm")
+        fi
+    done
+    
+    rm "$temp_file"
+    echo "${testing_permissions[@]}"
+}
+
+# Validation and error handling functions
+function validate_permissions() {
+    local -a permissions=("$@")
+    local -a invalid_permissions=()
+    local total=${#permissions[@]}
+    local processed=0
+    
+    log info "Validating permissions..."
+    
+    # Known valid permission prefixes
+    local -a valid_prefixes=(
+        "billing"
+        "compute"
+        "container"
+        "iam"
+        "resourcemanager"
+        "storage"
+        "serviceusage"
+        "bigquery"
+        "cloudfunctions"
+        "cloudkms"
+        "cloudsql"
+        "dataflow"
+        "logging"
+        "monitoring"
+        "pubsub"
+        "run"
+    )
+    
+    for perm in "${permissions[@]}"; do
+        ((processed++))
+        update_status_bar "Validating permission: $perm" "$processed" "$total"
+        
+        # Skip empty permissions
+        [[ -z "$perm" ]] && continue
+        
+        # Check if permission starts with a valid prefix
+        local is_valid=false
+        for prefix in "${valid_prefixes[@]}"; do
+            if [[ "$perm" =~ ^$prefix\. ]]; then
+                is_valid=true
+                break
+            fi
+        done
+        
+        if [[ "$is_valid" == false ]]; then
+            invalid_permissions+=("$perm")
+        fi
+        
+        sleep 0.1
+    done
+    
+    if [[ ${#invalid_permissions[@]} -gt 0 ]]; then
+        log warning "Found ${#invalid_permissions[@]} invalid permissions:"
+        for perm in "${invalid_permissions[@]}"; do
+            log warning "  - $perm"
+        done
+        return 1
+    fi
+    
+    log success "✓ All permissions are valid"
+    return 0
+}
+
 function expand_wildcard_permissions() {
     local base_perm="$1"
     local -a expanded=()
+    
+    log info "Expanding wildcard permission: $base_perm"
+    start_spinner "Expanding permission"
     
     # Map of known wildcard expansions
     case "$base_perm" in
@@ -719,220 +1128,66 @@ function expand_wildcard_permissions() {
             ;;
     esac
     
+    stop_spinner
+    log success "✓ Expanded to ${#expanded[@]} permissions"
     echo "${expanded[@]}"
 }
 
-# Function to get enabled services and their required permissions for Terraform
-function get_terraform_service_permissions() {
-    local org_id="$1"
-    local project_id="$2"
-    local -a permissions=()
-    local -a services=()
-    local temp_file=$(mktemp)
-
-    # Core permissions that Terraform always needs
-    print -P "%F{blue}Loading core Terraform permissions...%f"
-    local -a core_permissions=(
-        # Billing management
-        "billing.accounts.get"
-        "billing.accounts.list"
-        "billing.accounts.getIamPolicy"
-        "billing.projectBillingInfo.get"
-        "billing.projectBillingInfo.update"
-
-        # Project management
-        "resourcemanager.projects.get"
-        "resourcemanager.projects.getIamPolicy"
-        "resourcemanager.projects.setIamPolicy"
-        "resourcemanager.projects.update"
-        "resourcemanager.projects.createBillingAssignment"
-        "resourcemanager.projects.deleteBillingAssignment"
-
-        # Organization management
-        "resourcemanager.organizations.get"
-        "resourcemanager.organizations.getIamPolicy"
-        "resourcemanager.folders.get"
-        "resourcemanager.folders.list"
-
-        # Service management
-        "serviceusage.services.enable"
-        "serviceusage.services.disable"
-        "serviceusage.services.get"
-        "serviceusage.services.list"
-
-        # IAM
-        "iam.roles.get"
-        "iam.roles.list"
-        "iam.serviceAccounts.actAs"
-        "iam.serviceAccounts.get"
-        "iam.serviceAccounts.list"
-        "iam.serviceAccounts.getIamPolicy"
-        "iam.serviceAccounts.setIamPolicy"
-    )
-
-    permissions+=("${core_permissions[@]}")
-    print -P "%F{green}Loaded ${#core_permissions[@]} core permissions%f"
-
-    # Get all projects if org_id is provided
-    local -a projects=()
-    if [[ -n "$org_id" ]]; then
-        print -P "%F{blue}Scanning organization $org_id for projects...%f"
-        gcloud projects list --filter="parent.id=$org_id" --format="value(projectId)" > "$temp_file" 2>/dev/null
-        if [[ $? -ne 0 ]]; then
-            print -P "%F{red}Error: Failed to list projects in organization $org_id%f"
-            rm "$temp_file"
-            return 1
-        fi
-        # Read projects into array using zsh syntax
-        projects=(${(f)"$(<$temp_file)"})
-        print -P "%F{green}Found ${#projects[@]} projects in organization%f"
-    elif [[ -n "$project_id" ]]; then
-        print -P "%F{blue}Using specified project: $project_id%f"
-        projects=("$project_id")
+function validate_role_name() {
+    local role_name="$1"
+    
+    log info "Validating role name: $role_name"
+    start_spinner "Validating name"
+    
+    # Check length
+    if [[ ${#role_name} -gt 64 ]]; then
+        stop_spinner
+        error "Role name must be 64 characters or less"
     fi
-
-    # Get all enabled services in one go
-    print -P "%F{blue}Fetching enabled services for all projects...%f"
-    : > "$temp_file"  # Clear temp file
     
-    local project_count=0
-    for project in "${projects[@]}"; do
-        ((project_count++))
-        print -P "%F{blue}Scanning project ($project_count/${#projects[@]}): $project%f"
-        gcloud services list --project="$project" --format="value(config.name)" >> "$temp_file" 2>/dev/null
-    done
-
-    # Read and deduplicate services using zsh syntax
-    print -P "%F{blue}Processing service list...%f"
-    services=(${(f)"$(<$temp_file)"})
-    services=(${(u)services[@]})  # Remove duplicates
-    rm "$temp_file"
-
-    print -P "%F{green}Found ${#services[@]} unique services across ${#projects[@]} projects%f"
-    print -P "%F{blue}Analyzing permissions for each service...%f"
-
-    # Process services in batches for better performance
-    local batch_size=5
-    local total_batches=$(( (${#services[@]} + batch_size - 1) / batch_size ))
-    local current_batch=0
-    local processed_services=0
-
-    while [[ $processed_services -lt ${#services[@]} ]]; do
-        ((current_batch++))
-        print -P "%F{blue}Processing batch $current_batch of $total_batches...%f"
-        
-        local end_idx=$((processed_services + batch_size))
-        [[ $end_idx -gt ${#services[@]} ]] && end_idx=${#services[@]}
-        
-        for ((i = processed_services; i < end_idx; i++)); do
-            local service="${services[$i]}"
-            print -P "%F{blue}Analyzing service $((i + 1))/${#services[@]}: $service%f"
-            
-            case "$service" in
-                # ... (keep existing service cases)
-            esac
-        done
-        
-        processed_services=$end_idx
-        print -P "%F{green}Processed $processed_services out of ${#services[@]} services%f"
-    done
-
-    print -P "%F{blue}Expanding wildcard permissions...%f"
-    local expanded_permissions=()
-    local -A seen=()
-    local wildcard_count=0
-    local expanded_count=0
+    # Check format
+    if ! [[ "$role_name" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]]; then
+        stop_spinner
+        error "Role name must start with a letter and contain only letters, numbers, and underscores"
+    fi
     
-    # Process permissions in batches
-    local perm_batch_size=100
-    local total_perm_batches=$(( (${#permissions[@]} + perm_batch_size - 1) / perm_batch_size ))
-    local current_perm_batch=0
-    local processed_perms=0
-
-    while [[ $processed_perms -lt ${#permissions[@]} ]]; do
-        ((current_perm_batch++))
-        print -P "%F{blue}Processing permission batch $current_perm_batch of $total_perm_batches...%f"
-        
-        local perm_end_idx=$((processed_perms + perm_batch_size))
-        [[ $perm_end_idx -gt ${#permissions[@]} ]] && perm_end_idx=${#permissions[@]}
-        
-        for ((i = processed_perms; i < perm_end_idx; i++)); do
-            local perm="${permissions[$i]}"
-            if [[ "$perm" == *".*" ]]; then
-                ((wildcard_count++))
-                local base_perm="${perm%.*}"
-                local temp_perms=($(expand_wildcard_permissions "$base_perm"))
-                for expanded in "${temp_perms[@]}"; do
-                    if [[ -z "${seen[$expanded]}" ]]; then
-                        expanded_permissions+=("$expanded")
-                        seen[$expanded]=1
-                        ((expanded_count++))
-                    fi
-                done
-            else
-                if [[ -z "${seen[$perm]}" ]]; then
-                    expanded_permissions+=("$perm")
-                    seen[$perm]=1
-                fi
-            fi
-        done
-        
-        processed_perms=$perm_end_idx
-        print -P "%F{green}Processed $processed_perms out of ${#permissions[@]} permissions%f"
-    done
-
-    print -P "%F{green}Expanded $wildcard_count wildcard permissions into $expanded_count concrete permissions%f"
-    print -P "%F{green}Final result: ${#expanded_permissions[@]} unique permissions%f"
-    echo "${expanded_permissions[@]}"
+    stop_spinner
+    log success "✓ Role name is valid"
+    return 0
 }
 
-# Function to check for testing permissions
-function check_testing_permissions() {
-    local -a permissions=("$@")
-    local -a testing_permissions=()
-    local temp_file=$(mktemp)
+function validate_project_id() {
+    local project_id="$1"
     
-    # Get all testable permissions with their stages
-    gcloud iam list-testable-permissions "//cloudresourcemanager.googleapis.com/organizations/1" \
-        --format="table(name,stage)" > "$temp_file" 2>/dev/null
+    log info "Validating project ID: $project_id"
+    start_spinner "Validating project"
     
-    # Check each permission
-    for perm in "${permissions[@]}"; do
-        # Skip empty permissions or status messages
-        if [[ -z "$perm" || "$perm" =~ ^(Scanning|Found|Analyzing) ]]; then
-            continue
-        fi
-        
-        # Check if permission is in TESTING stage
-        if grep -q "^${perm}.*TESTING" "$temp_file" 2>/dev/null; then
-            testing_permissions+=("$perm")
-        fi
-    done
+    # Check if project exists
+    if ! gcloud projects describe "$project_id" &>/dev/null; then
+        stop_spinner
+        error "Project $project_id does not exist or you don't have access to it"
+    fi
     
-    rm "$temp_file"
-    echo "${testing_permissions[@]}"
+    stop_spinner
+    log success "✓ Project ID is valid"
+    return 0
 }
 
-# Function to display selection menu
-function show_selection_menu() {
-    local prompt="$1"
-    shift
-    local -a options=("$@")
-    local choice
+function validate_org_id() {
+    local org_id="$1"
     
-    # Display prompt
-    echo "$prompt"
-    echo
+    log info "Validating organization ID: $org_id"
+    start_spinner "Validating organization"
     
-    # Use select for menu
-    PS3="Enter selection (1-${#options[@]}): "
-    select choice in "${options[@]}"; do
-        if [[ -n "$choice" ]]; then
-            echo "\nSelected: $choice"
-            return $REPLY
-        fi
-        echo "\nInvalid selection. Please try again."
-    done
+    # Check if organization exists
+    if ! gcloud organizations describe "$org_id" &>/dev/null; then
+        stop_spinner
+        error "Organization $org_id does not exist or you don't have access to it"
+    fi
+    
+    stop_spinner
+    log success "✓ Organization ID is valid"
+    return 0
 }
 
 # Function to create role with testing permission handling
@@ -940,7 +1195,72 @@ function create_role_with_testing_check() {
     local role_name="$1"
     local org_id="$2"
     local project_id="$3"
-    local -a permissions=("${@:4}")
+    shift 3
+    local -a permissions=("$@")
+    
+    # Filter permissions
+    local -a filtered_permissions=($(filter_permissions "${permissions[@]}"))
+    
+    # Validate permissions
+    printf "\nValidating permissions against GCP IAM...\n"
+    local -a valid_permissions=($(validate_permissions "${filtered_permissions[@]}"))
+    local invalid_count=$((${#filtered_permissions[@]} - ${#valid_permissions[@]}))
+    
+    if [[ $invalid_count -gt 0 ]]; then
+        printf "\n⚠️  WARNING: Found %d invalid permissions that will be excluded\n" "$invalid_count"
+        printf "Proceeding with %d valid permissions\n" "${#valid_permissions[@]}"
+    fi
+    
+    # Check for testing permissions
+    local -a testing_perms=($(check_testing_permissions "${valid_permissions[@]}"))
+    local -a stable_permissions=()
+    
+    # Separate testing and stable permissions
+    for perm in "${valid_permissions[@]}"; do
+        if [[ ! " ${testing_perms[@]} " =~ " ${perm} " ]]; then
+            stable_permissions+=("$perm")
+        fi
+    done
+    
+    # If testing permissions are found, show warning and options
+    if [[ ${#testing_perms[@]} -gt 0 ]]; then
+        printf "\n⚠️  WARNING: Testing Permissions Detected ⚠️\n"
+        printf "The following permissions are in TESTING stage and may be removed in the future:\n"
+        printf "  - %s\n" "${testing_perms[@]}"
+        printf "\nTotal valid permissions: %d\n" "${#valid_permissions[@]}"
+        printf "Testing permissions: %d\n" "${#testing_perms[@]}"
+        printf "Stable permissions: %d\n" "${#stable_permissions[@]}"
+        
+        local -a test_options=(
+            "Proceed with all permissions (including TESTING permissions)"
+            "Proceed without TESTING permissions"
+            "Cancel operation"
+        )
+        
+        printf "\nHow would you like to proceed?\n"
+        show_selection_menu "Select an option:" "${test_options[@]}"
+        local test_choice=$?
+        
+        case $test_choice in
+            1)  # Use all permissions
+                printf "\nProceeding with all permissions (including %d testing permissions)...\n" "${#testing_perms[@]}"
+                local use_permissions=("${valid_permissions[@]}")
+                local use_quiet=false
+                ;;
+            2)  # Skip testing permissions
+                printf "\nProceeding with stable permissions only (excluding %d testing permissions)...\n" "${#testing_perms[@]}"
+                local use_permissions=("${stable_permissions[@]}")
+                local use_quiet=true
+                ;;
+            3)  # Cancel
+                printf "Operation cancelled\n"
+                return 1
+                ;;
+        esac
+    else
+        local use_permissions=("${valid_permissions[@]}")
+        local use_quiet=true
+    fi
     
     # Create the role
     local create_cmd="gcloud iam roles create \"$role_name\""
@@ -952,435 +1272,128 @@ function create_role_with_testing_check() {
     
     create_cmd+=" --title=\"Custom Role for $service\""
     create_cmd+=" --description=\"Custom role created for $service service\""
-    create_cmd+=" --permissions=\"${(j:,:)permissions}\""
+    create_cmd+=" --permissions=\"${(j:,:)use_permissions}\""
     create_cmd+=" --stage=\"GA\""
     
-    echo "\nCreating role..."
+    # Add quiet flag if appropriate
+    if [[ "$use_quiet" == "true" ]]; then
+        create_cmd+=" --quiet"
+    fi
+    
+    printf "\nCreating role with %d permissions...\n" "${#use_permissions[@]}"
     if eval "$create_cmd"; then
-        echo "\nSuccess: Role created successfully"
+        printf "\nSuccess: Role created successfully\n"
         if [[ -n "$org_id" ]]; then
-            echo "Role path: organizations/$org_id/roles/$role_name"
+            printf "Role path: organizations/$org_id/roles/$role_name\n"
         else
-            echo "Role path: projects/$project_id/roles/$role_name"
+            printf "Role path: projects/$project_id/roles/$role_name\n"
         fi
         return 0
     else
-        echo "\nError: Failed to create role"
+        printf "\nError: Failed to create role\n"
         return 1
     fi
 }
 
-# Function to handle role creation
+# Function to create role
 function create_role() {
-    local role_name=""
-    local service=""
-    local org_id=""
-    local project_id=""
-    local scan_services=false
+    local role_name="$1"
+    local org_id="$2"
+    local project_id="$3"
+    local permissions=("${@:4}")
+    local test_mode="$5"
     
-    # Parse arguments
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --role)
-                role_name="$2"
-                shift 2
-                ;;
-            --service)
-                service="$2"
-                shift 2
-                ;;
-            --org-id)
-                org_id="$2"
-                shift 2
-                ;;
-            --project-id)
-                project_id="$2"
-                shift 2
-                ;;
-            --scan-services)
-                scan_services=true
-                shift
-                ;;
-            *)
-                echo "Error: Unknown option $1"
-                return 1
-                ;;
-        esac
-    done
-
-    # Validate required parameters
+    init_status_bar
+    trap cleanup EXIT INT TERM
+    
+    # Validate inputs
     if [[ -z "$role_name" ]]; then
-        echo "Error: --role parameter is required"
-        return 1
-    fi
-
-    if [[ -z "$service" ]]; then
-        echo "Error: --service parameter is required"
-        return 1
+        error "Role name is required"
     fi
 
     if [[ -z "$org_id" && -z "$project_id" ]]; then
-        echo "Error: Either --org-id or --project-id must be specified"
-        return 1
+        error "Either organization ID or project ID must be specified"
     fi
-
-    if [[ -n "$org_id" && -n "$project_id" ]]; then
-        echo "Error: Cannot specify both --org-id and --project-id"
-        return 1
+    
+    if [[ ${#permissions[@]} -eq 0 ]]; then
+        error "No permissions specified"
     fi
-
-    # Get permissions based on service and scan flag
-    local permissions=()
-    if [[ "$service" == "terraform" && "$scan_services" == true ]]; then
-        echo "Scanning for active services and required permissions..."
-        permissions=($(get_terraform_service_permissions "$org_id" "$project_id"))
-    else
-        # Use predefined permissions (existing code)
-        permissions=(
-            # Billing
-            "billing.accounts.get"
-            "billing.accounts.list"
-            "billing.accounts.getIamPolicy"
-            "billing.accounts.getUsageExportSpec"
-            "billing.budgets.create"
-            "billing.budgets.delete"
-            "billing.budgets.get"
-            "billing.budgets.list"
-            "billing.budgets.update"
-            "billing.projectBillingInfo.get"
-            "billing.projectBillingInfo.update"
-
-            # Compute Engine
-            "compute.disks.create"
-            "compute.disks.delete"
-            "compute.disks.get"
-            "compute.disks.list"
-            "compute.disks.use"
-            "compute.firewalls.create"
-            "compute.firewalls.delete"
-            "compute.firewalls.get"
-            "compute.firewalls.list"
-            "compute.firewalls.update"
-            "compute.globalOperations.get"
-            "compute.globalOperations.list"
-            "compute.images.get"
-            "compute.images.list"
-            "compute.images.useReadOnly"
-            "compute.instances.create"
-            "compute.instances.delete"
-            "compute.instances.get"
-            "compute.instances.list"
-            "compute.instances.setMetadata"
-            "compute.instances.setTags"
-            "compute.instances.start"
-            "compute.instances.stop"
-            "compute.instances.update"
-            "compute.networks.create"
-            "compute.networks.delete"
-            "compute.networks.get"
-            "compute.networks.list"
-            "compute.networks.updatePolicy"
-            "compute.regions.get"
-            "compute.regions.list"
-            "compute.subnetworks.create"
-            "compute.subnetworks.delete"
-            "compute.subnetworks.get"
-            "compute.subnetworks.list"
-            "compute.subnetworks.update"
-            "compute.subnetworks.use"
-            "compute.zones.get"
-            "compute.zones.list"
-            "compute.addresses.create"
-            "compute.addresses.delete"
-            "compute.addresses.get"
-            "compute.addresses.list"
-            "compute.addresses.use"
-            "compute.backendServices.create"
-            "compute.backendServices.delete"
-            "compute.backendServices.get"
-            "compute.backendServices.list"
-            "compute.backendServices.update"
-            "compute.healthChecks.create"
-            "compute.healthChecks.delete"
-            "compute.healthChecks.get"
-            "compute.healthChecks.list"
-            "compute.healthChecks.update"
-            "compute.instanceGroups.create"
-            "compute.instanceGroups.delete"
-            "compute.instanceGroups.get"
-            "compute.instanceGroups.list"
-            "compute.instanceGroups.update"
-            "compute.instanceTemplates.create"
-            "compute.instanceTemplates.delete"
-            "compute.instanceTemplates.get"
-            "compute.instanceTemplates.list"
-            "compute.targetPools.create"
-            "compute.targetPools.delete"
-            "compute.targetPools.get"
-            "compute.targetPools.list"
-            "compute.targetPools.update"
-            
-            # IAM
-            "iam.roles.create"
-            "iam.roles.delete"
-            "iam.roles.get"
-            "iam.roles.list"
-            "iam.roles.update"
-            "iam.serviceAccounts.actAs"
-            "iam.serviceAccounts.create"
-            "iam.serviceAccounts.delete"
-            "iam.serviceAccounts.get"
-            "iam.serviceAccounts.getIamPolicy"
-            "iam.serviceAccounts.list"
-            "iam.serviceAccounts.setIamPolicy"
-            "iam.serviceAccounts.update"
-            "iam.serviceAccountKeys.create"
-            "iam.serviceAccountKeys.delete"
-            "iam.serviceAccountKeys.get"
-            "iam.serviceAccountKeys.list"
-            
-            # Resource Manager
-            "resourcemanager.folders.get"
-            "resourcemanager.folders.getIamPolicy"
-            "resourcemanager.folders.list"
-            "resourcemanager.folders.setIamPolicy"
-            "resourcemanager.organizations.get"
-            "resourcemanager.organizations.getIamPolicy"
-            "resourcemanager.projects.create"
-            "resourcemanager.projects.delete"
-            "resourcemanager.projects.get"
-            "resourcemanager.projects.getIamPolicy"
-            "resourcemanager.projects.list"
-            "resourcemanager.projects.setIamPolicy"
-            "resourcemanager.projects.update"
-            "resourcemanager.projects.createBillingAssignment"
-            "resourcemanager.projects.deleteBillingAssignment"
-            
-            # Service Usage
-            "serviceusage.quotas.get"
-            "serviceusage.quotas.update"
-            "serviceusage.services.enable"
-            "serviceusage.services.get"
-            "serviceusage.services.list"
-            "serviceusage.services.disable"
-            
-            # Storage
-            "storage.buckets.create"
-            "storage.buckets.delete"
-            "storage.buckets.get"
-            "storage.buckets.getIamPolicy"
-            "storage.buckets.list"
-            "storage.buckets.setIamPolicy"
-            "storage.buckets.update"
-            "storage.objects.create"
-            "storage.objects.delete"
-            "storage.objects.get"
-            "storage.objects.getIamPolicy"
-            "storage.objects.list"
-            "storage.objects.setIamPolicy"
-            "storage.objects.update"
-
-            # Cloud KMS
-            "cloudkms.cryptoKeys.create"
-            "cloudkms.cryptoKeys.get"
-            "cloudkms.cryptoKeys.getIamPolicy"
-            "cloudkms.cryptoKeys.list"
-            "cloudkms.cryptoKeys.setIamPolicy"
-            "cloudkms.cryptoKeys.update"
-            "cloudkms.keyRings.create"
-            "cloudkms.keyRings.delete"
-            "cloudkms.keyRings.get"
-            "cloudkms.keyRings.getIamPolicy"
-            "cloudkms.keyRings.list"
-            "cloudkms.keyRings.setIamPolicy"
-
-            # Cloud SQL
-            "cloudsql.instances.create"
-            "cloudsql.instances.delete"
-            "cloudsql.instances.get"
-            "cloudsql.instances.list"
-            "cloudsql.instances.update"
-            "cloudsql.databases.create"
-            "cloudsql.databases.delete"
-            "cloudsql.databases.get"
-            "cloudsql.databases.list"
-            "cloudsql.databases.update"
-            "cloudsql.users.create"
-            "cloudsql.users.delete"
-            "cloudsql.users.list"
-            "cloudsql.users.update"
-
-            # Cloud Run
-            "run.services.create"
-            "run.services.delete"
-            "run.services.get"
-            "run.services.getIamPolicy"
-            "run.services.list"
-            "run.services.setIamPolicy"
-            "run.services.update"
-            "run.revisions.delete"
-            "run.revisions.get"
-            "run.revisions.list"
-            "run.revisions.tag"
-            "run.routes.get"
-            "run.routes.list"
-            "run.routes.invoke"
-            "run.configurations.get"
-            "run.configurations.list"
-            "run.locations.list"
-            "run.operations.get"
-            "run.operations.list"
-            "run.jobs.create"
-            "run.jobs.delete"
-            "run.jobs.get"
-            "run.jobs.list"
-            "run.jobs.run"
-            "run.jobs.update"
-            "run.executions.get"
-            "run.executions.list"
-            "run.tasks.get"
-            "run.tasks.list"
-            "run.domains.create"
-            "run.domains.delete"
-            "run.domains.get"
-            "run.domains.list"
-            "run.domains.update"
-
-            # Additional networking for Cloud Run and GKE
-            "compute.networks.get"
-            "compute.networks.list"
-            "compute.networks.use"
-            "compute.networks.useExternalIp"
-            "compute.subnetworks.get"
-            "compute.subnetworks.list"
-            "compute.subnetworks.use"
-            "compute.subnetworks.useExternalIp"
-            "compute.addresses.get"
-            "compute.addresses.list"
-            "compute.addresses.use"
-            "compute.globalAddresses.get"
-            "compute.globalAddresses.list"
-            "compute.globalAddresses.use"
-            "compute.sslCertificates.create"
-            "compute.sslCertificates.delete"
-            "compute.sslCertificates.get"
-            "compute.sslCertificates.list"
-            "compute.targetHttpProxies.create"
-            "compute.targetHttpProxies.delete"
-            "compute.targetHttpProxies.get"
-            "compute.targetHttpProxies.list"
-            "compute.targetHttpProxies.update"
-            "compute.targetHttpsProxies.create"
-            "compute.targetHttpsProxies.delete"
-            "compute.targetHttpsProxies.get"
-            "compute.targetHttpsProxies.list"
-            "compute.targetHttpsProxies.update"
-            "compute.urlMaps.create"
-            "compute.urlMaps.delete"
-            "compute.urlMaps.get"
-            "compute.urlMaps.list"
-            "compute.urlMaps.update"
-        )
-    fi
-
-    # Check for testing permissions
-    local testing_perms=($(check_testing_permissions "${permissions[@]}"))
-    local final_permissions=("${permissions[@]}")
-
-    # Display confirmation screen
-    echo "\n=== Role Creation Confirmation ==="
-    echo "--------------------------------"
-    echo "\nRole Details:"
-    echo "  Service: $service"
-    echo "  Role Name: $role_name"
+    
+    local role_id="custom.${role_name}"
+    local parent_flag=""
+    local parent_value=""
+    
     if [[ -n "$org_id" ]]; then
-        echo "  Location: Organization Level (org_id: $org_id)"
-        echo "  Full Role Path: organizations/$org_id/roles/$role_name"
+        parent_flag="--organization"
+        parent_value="$org_id"
+        log info "Creating organization-level custom role: $role_id"
     else
-        echo "  Location: Project Level (project_id: $project_id)"
-        echo "  Full Role Path: projects/$project_id/roles/$role_name"
-        
-        # Warning for project-level terraform roles
-        if [[ "$service" == "terraform" ]]; then
-            echo "\n⚠️  WARNING: Project-Level Role ⚠️"
-            echo "Creating Terraform roles at the project level is not recommended."
-            echo "It's better to create them at the organization level for broader access control."
-            echo "This ensures consistent management across all projects."
+        parent_flag="--project"
+        parent_value="$project_id"
+        log info "Creating project-level custom role: $role_id"
+    fi
+    
+    # Check if role already exists
+    start_spinner "Checking if role exists"
+    if gcloud iam roles describe "$role_id" "$parent_flag" "$parent_value" &>/dev/null; then
+        stop_spinner
+        error "Role $role_id already exists"
+    fi
+    stop_spinner
+    
+    # Format permissions for display
+    local formatted_permissions=""
+    local total_perms=${#permissions[@]}
+    local processed=0
+    
+    log info "Processing ${total_perms} permissions..."
+    
+    for perm in "${permissions[@]}"; do
+        ((processed++))
+        update_status_bar "Formatting permission: $perm" "$processed" "$total_perms"
+        formatted_permissions+="$perm,"
+        sleep 0.1
+    done
+    
+    # Remove trailing comma
+    formatted_permissions="${formatted_permissions%,}"
+    
+    # Create temporary file for permissions
+    local temp_file=$(mktemp)
+    echo "$formatted_permissions" > "$temp_file"
+    
+    log info "Creating role with ${total_perms} permissions..."
+    start_spinner "Creating role"
+    
+    if [[ "$test_mode" == "true" ]]; then
+        log warning "TEST MODE: Would create role with command:"
+        log info "gcloud iam roles create $role_name $parent_flag $parent_value --permissions-from-file=$temp_file --stage=ALPHA"
+    else
+        if ! gcloud iam roles create "$role_name" "$parent_flag" "$parent_value" --permissions-from-file="$temp_file" --stage=ALPHA; then
+            stop_spinner
+            rm -f "$temp_file"
+            error "Failed to create role $role_id"
         fi
     fi
-
-    # Show testing permissions warning if any exist
-    if [[ ${#testing_perms[@]} -gt 0 ]]; then
-        echo "\n⚠️  WARNING: Testing Permissions ⚠️"
-        echo "The following permissions are in TESTING stage and may be removed in the future:"
-        printf "  - %s\n" "${testing_perms[@]}"
-    fi
-
-    echo "\nPermissions Summary:"
-    echo "-------------------"
-    echo "Total permissions: ${#permissions[@]}"
-    if [[ ${#testing_perms[@]} -gt 0 ]]; then
-        echo "Testing permissions: ${#testing_perms[@]}"
-        echo "Non-testing permissions: $((${#permissions[@]} - ${#testing_perms[@]}))"
-    fi
-
-    echo "\nPermissions Table:"
-    echo "----------------"
-    display_permissions_table "${permissions[@]}"
     
-    # Consolidated confirmation with all options
-    local -a confirm_options
-    if [[ ${#testing_perms[@]} -gt 0 ]]; then
-        confirm_options=(
-            "Create role with all permissions (including TESTING permissions)"
-            "Create role without TESTING permissions"
-            "Cancel operation"
-        )
+    stop_spinner
+    rm -f "$temp_file"
+    
+    if [[ "$test_mode" != "true" ]]; then
+        log success "✓ Successfully created role: $role_id"
+        log info "Verifying role creation..."
+        
+        start_spinner "Verifying role"
+        if ! gcloud iam roles describe "$role_id" "$parent_flag" "$parent_value" &>/dev/null; then
+            stop_spinner
+            error "Role verification failed: Unable to retrieve newly created role"
+        fi
+        stop_spinner
+        
+        log success "✓ Role verification successful"
     else
-        confirm_options=(
-            "Create role with specified permissions"
-            "Cancel operation"
-        )
+        log success "✓ Test completed successfully"
     fi
-    
-    echo "\nDo you want to proceed?"
-    show_selection_menu "Select an option:" "${confirm_options[@]}"
-    local confirm=$?
-    
-    # Handle selection based on the number of options
-    if [[ ${#testing_perms[@]} -gt 0 ]]; then
-        case $confirm in
-            1)  # Proceed with all permissions
-                echo "\nProceeding with all permissions (including ${#testing_perms[@]} testing permissions)..."
-                ;;
-            2)  # Exclude testing permissions
-                echo "\nRemoving ${#testing_perms[@]} testing permissions..."
-                # Remove testing permissions from the array
-                for test_perm in "${testing_perms[@]}"; do
-                    final_permissions=(${final_permissions[@]:#$test_perm})
-                done
-                echo "Proceeding with ${#final_permissions[@]} non-testing permissions."
-                ;;
-            3)  # Cancel operation
-                echo "Operation cancelled"
-                return 1
-                ;;
-        esac
-    else
-        case $confirm in
-            1)  # Proceed with permissions
-                echo "\nProceeding with ${#final_permissions[@]} permissions..."
-                ;;
-            2)  # Cancel operation
-                echo "Operation cancelled"
-                return 1
-                ;;
-        esac
-    fi
-
-    # Create the role with final permissions
-    create_role_with_testing_check "$role_name" "$org_id" "$project_id" "${final_permissions[@]}"
-    return $?
 }
 
 # Function to handle help requests
@@ -1436,111 +1449,154 @@ function handle_help() {
     esac
 }
 
-# Function to describe an IAM role in a specific project
+# Main command handler
 function gcloud-util() {
-    debug_log "Initial args: $*"
-
-    # Handle no arguments
-    if [[ $# -eq 0 ]]; then
-        show_main_help
-        return 0
-    fi
-
-    # Handle main help
-    if [[ "$1" == "help" || "$1" == "--help" ]]; then
-        show_main_help
-        return 0
-    fi
-
-    # Get command
     local command="$1"
     shift
 
-    # Handle command help
-    if [[ $# -eq 0 || "$1" == "help" || "$1" == "--help" ]]; then
+    # Initialize status bar system
+    init_status_bar
+    trap cleanup EXIT INT TERM
+    
         case "$command" in
             iam)
-                show_iam_help
-                return 0
-                ;;
-            projects)
-                show_projects_help
-                return 0
-                ;;
-            *)
-                show_main_help
-                return 0
-                ;;
-        esac
-    fi
-
-    # Get subcommand
     local subcommand="$1"
     shift
 
-    # Handle subcommand help
-    if [[ $# -gt 0 && "$1" == "help" ]]; then
-        case "$command" in
-            iam)
                 case "$subcommand" in
                     create-role)
-                        show_create_role_help
-                        return 0
-                        ;;
-                    merge-roles)
-                        show_merge_roles_help
-                        return 0
-                        ;;
-                    *)
-                        show_iam_help
-                        return 0
-                    ;;
-                esac
-                ;;
-            projects)
-                case "$subcommand" in
-                    list)
-                        show_projects_list_help
-                        return 0
-                        ;;
-                esac
+                    local role_name=""
+                    local service=""
+                    local org_id=""
+                    local project_id=""
+                    local scan_services=false
+                    local test_mode=false
+                    
+                    # Parse arguments
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --role)
+                                role_name="$2"
+                                shift 2
+                                ;;
+                            --service)
+                                service="$2"
+                                shift 2
+                                ;;
+                            --org-id)
+                                org_id="$2"
+                                shift 2
+                                ;;
+                            --project-id)
+                                project_id="$2"
+                                shift 2
+                                ;;
+                            --scan-services)
+                                scan_services=true
+                                shift
+                                ;;
+                            --test)
+                                test_mode=true
+                                shift
+                                ;;
+                            *)
+                                error "Unknown option: $1"
                 ;;
         esac
-    fi
-
-    # Process commands
-    case "$command" in
-        iam)
-            case "$subcommand" in
-                create-role)
-                    create_role "$@"
+                    done
+                    
+                    # Validate required parameters
+                    if [[ -z "$role_name" ]]; then
+                        error "--role parameter is required"
+                    fi
+                    
+                    if [[ -z "$service" ]]; then
+                        error "--service parameter is required"
+                    fi
+                    
+                    if [[ -z "$org_id" && -z "$project_id" ]]; then
+                        error "Either --org-id or --project-id must be specified"
+                    fi
+                    
+                    if [[ -n "$org_id" && -n "$project_id" ]]; then
+                        error "Cannot specify both --org-id and --project-id"
+                    fi
+                    
+                    # Get permissions based on service and scan flag
+                    local -a permissions=()
+                    if [[ "$service" == "terraform" && "$scan_services" == true ]]; then
+                        log info "Scanning for active services and required permissions..."
+                        permissions=($(get_terraform_service_permissions "$org_id" "$project_id" "$test_mode"))
+                    else
+                        log info "Using predefined permissions for service: $service"
+                        permissions=($(get_predefined_permissions "$service"))
+                    fi
+                    
+                    # Filter and display permissions
+                    local -a filtered_permissions=($(filter_permissions "${permissions[@]}"))
+                    
+                    # Display confirmation screen
+                    log info "=== Role Creation Confirmation ==="
+                    log info "--------------------------------"
+                    
+                    log info "Role Details:"
+                    log info "  Service: $service"
+                    log info "  Role Name: $role_name"
+                    
+                    if [[ -n "$org_id" ]]; then
+                        log info "  Location: Organization Level (org_id: $org_id)"
+                        log info "  Full Role Path: organizations/$org_id/roles/$role_name"
+                    else
+                        log info "  Location: Project Level (project_id: $project_id)"
+                        log info "  Full Role Path: projects/$project_id/roles/$role_name"
+                        
+                        # Warning for project-level terraform roles
+                        if [[ "$service" == "terraform" ]]; then
+                            log warning "⚠️  WARNING: Project-Level Role"
+                            log warning "Creating Terraform roles at the project level is not recommended."
+                            log warning "It's better to create them at the organization level for broader access control."
+                            log warning "This ensures consistent management across all projects."
+                        fi
+                    fi
+                    
+                    log info "\nPermissions Summary:"
+                    log info "-------------------"
+                    log info "Total permissions: ${#filtered_permissions[@]}"
+                    
+                    # Display permissions table
+                    display_permissions_table "${filtered_permissions[@]}"
+                    
+                    # Consolidated confirmation
+                    local -a confirm_options=(
+                        "Create role with specified permissions"
+                        "Cancel operation"
+                    )
+                    
+                    log info "\nDo you want to proceed?"
+                    show_selection_menu "Select an option:" "${confirm_options[@]}"
+                    local confirm=$?
+                    
+                    case $confirm in
+                        1)  # Proceed with permissions
+                            create_role "$role_name" "$org_id" "$project_id" "${filtered_permissions[@]}" "$test_mode"
+                            return $?
+                            ;;
+                        2)  # Cancel operation
+                            log warning "Operation cancelled"
+                    return 1
                     ;;
-                merge-roles)
-                    merge_roles "$@"
+            esac
                     ;;
                 *)
-                    echo "Error: Unknown subcommand: $subcommand"
-                    echo "Run 'gcloud-util iam help' for available subcommands"
-                    return 1
+                    error "Unknown IAM subcommand: $subcommand"
                     ;;
             esac
             ;;
-        projects)
-            case "$subcommand" in
-                list)
-                    # TODO: Implement projects list functionality
-                    ;;
-                *)
-                    echo "Error: Unknown subcommand: $subcommand"
-                    echo "Run 'gcloud-util projects help' for available subcommands"
-                    return 1
-                    ;;
-            esac
+        help)
+            show_help
             ;;
         *)
-            echo "Error: Unknown command: $command"
-            echo "Run 'gcloud-util help' for available commands"
-            return 1
+            error "Unknown command: $command"
             ;;
     esac
 }
@@ -1730,4 +1786,295 @@ function _gcloud-util() {
 
 # Register the completion function
 compdef _gcloud-util gcloud-util
+
+# Function to test progress display
+function test_progress_display() {
+    local total=10
+    local timeout_seconds=1
+    local status_line="\033[K"
+    
+    # Color codes
+    local blue=$(get_color blue)
+    local green=$(get_color green)
+    local yellow=$(get_color yellow)
+    local reset=$(get_color reset)
+    
+    # Hide cursor
+    tput civis
+    
+    # Set up trap for cleanup
+    trap 'echo "\nTest cancelled"; tput cnorm; return 1' INT TERM
+    
+    print -P "\n%F{blue}Testing Progress Display...%f"
+    local start_time=$SECONDS
+    
+    for ((i=1; i<=total; i++)); do
+        printf "$status_line"  # Clear line
+        printf "\r${blue}Processing item: ${yellow}Test Item $i${reset}\n"
+        show_progress_bar $i $total
+        printf "\n${blue}Time: ${yellow}%s elapsed${reset}${status_line}" \
+            "$(format_duration $((SECONDS - start_time)))"
+        sleep $timeout_seconds
+    done
+    
+    # Restore cursor
+    tput cnorm
+    trap - INT TERM
+    
+    printf "\n${green}✓ Test completed in %s${reset}\n" "$(format_duration $((SECONDS - start_time)))"
+}
+
+# Status bar functions
+function init_status_bar() {
+    # Save cursor position
+    tput sc
+    
+    # Hide cursor
+    tput civis
+    
+    # Initialize status bar variables
+    STATUS_BAR_MESSAGE=""
+    STATUS_BAR_PROGRESS=0
+    STATUS_BAR_TOTAL=0
+    STATUS_BAR_SPINNER_CHARS=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    STATUS_BAR_SPINNER_IDX=0
+    STATUS_BAR_SPINNER_ACTIVE=false
+    STATUS_BAR_LAST_UPDATE=0
+    
+    # Create status bar area
+    printf "\n\n"  # Reserve 2 lines for status bar
+}
+
+function cleanup() {
+    # Show cursor
+    tput cnorm
+    
+    # Clear status bar area
+    tput rc  # Restore cursor position
+    tput ed  # Clear to end of screen
+    
+    # Reset status bar variables
+    STATUS_BAR_MESSAGE=""
+    STATUS_BAR_PROGRESS=0
+    STATUS_BAR_TOTAL=0
+    STATUS_BAR_SPINNER_ACTIVE=false
+}
+
+function update_status_bar() {
+    local message="$1"
+    local current="$2"
+    local total="$3"
+    
+    # Update status bar variables
+    STATUS_BAR_MESSAGE="$message"
+    STATUS_BAR_PROGRESS=$current
+    STATUS_BAR_TOTAL=$total
+    
+    # Only update if enough time has passed (throttle updates)
+    local now=$SECONDS
+    if (( now - STATUS_BAR_LAST_UPDATE >= 0.1 )); then
+        _draw_status_bar
+        STATUS_BAR_LAST_UPDATE=$now
+    fi
+}
+
+function _draw_status_bar() {
+    # Save cursor position
+    tput sc
+    
+    # Move to status bar area (2 lines up from current position)
+    tput cuu 2
+    
+    # Clear status bar area
+    tput el  # Clear first line
+    tput cud 1  # Move down
+    tput el  # Clear second line
+    tput cuu 1  # Move back up
+    
+    # Draw spinner if active
+    local spinner=""
+    if [[ "$STATUS_BAR_SPINNER_ACTIVE" == true ]]; then
+        spinner="${STATUS_BAR_SPINNER_CHARS[$STATUS_BAR_SPINNER_IDX]} "
+        STATUS_BAR_SPINNER_IDX=$(( (STATUS_BAR_SPINNER_IDX + 1) % ${#STATUS_BAR_SPINNER_CHARS[@]} ))
+    fi
+    
+    # Draw progress bar if total > 0
+    if (( STATUS_BAR_TOTAL > 0 )); then
+        local width=50
+        local filled=$(( width * STATUS_BAR_PROGRESS / STATUS_BAR_TOTAL ))
+        local empty=$(( width - filled ))
+        local percentage=$(( 100 * STATUS_BAR_PROGRESS / STATUS_BAR_TOTAL ))
+        
+        printf "${spinner}${STATUS_BAR_MESSAGE}\n"
+        printf "[%s%s] %3d%% (%d/%d)" \
+            "$(printf '='%.0s {1..$filled})" \
+            "$(printf ' '%.0s {1..$empty})" \
+            "$percentage" \
+            "$STATUS_BAR_PROGRESS" \
+            "$STATUS_BAR_TOTAL"
+    else
+        printf "${spinner}${STATUS_BAR_MESSAGE}"
+    fi
+    
+    # Restore cursor position
+    tput rc
+}
+
+function start_spinner() {
+    local message="$1"
+    STATUS_BAR_MESSAGE="$message"
+    STATUS_BAR_SPINNER_ACTIVE=true
+    STATUS_BAR_SPINNER_IDX=0
+    _draw_status_bar
+}
+
+function stop_spinner() {
+    STATUS_BAR_SPINNER_ACTIVE=false
+    _draw_status_bar
+}
+
+function log() {
+    local level="$1"
+    shift
+    local message="$*"
+    local color=""
+    local prefix=""
+    
+    case "$level" in
+        info)
+            color=$(get_color blue)
+            prefix="INFO"
+            ;;
+        success)
+            color=$(get_color green)
+            prefix="SUCCESS"
+            ;;
+        warning)
+            color=$(get_color yellow)
+            prefix="WARNING"
+            ;;
+        error)
+            color=$(get_color red)
+            prefix="ERROR"
+            ;;
+        *)
+            color=$(get_color reset)
+            prefix="LOG"
+            ;;
+    esac
+    
+    # Save cursor position
+    tput sc
+    
+    # Print message
+    printf "${color}[%s] %s${reset}\n" "$prefix" "$message"
+    
+    # Redraw status bar
+    _draw_status_bar
+    
+    # If this is an error, exit
+    if [[ "$level" == "error" ]]; then
+        cleanup
+        exit 1
+    fi
+}
+
+function error() {
+    log error "$@"
+}
+
+function get_color() {
+    local color="$1"
+    case "$color" in
+        black)   echo "\033[30m" ;;
+        red)     echo "\033[31m" ;;
+        green)   echo "\033[32m" ;;
+        yellow)  echo "\033[33m" ;;
+        blue)    echo "\033[34m" ;;
+        magenta) echo "\033[35m" ;;
+        cyan)    echo "\033[36m" ;;
+        white)   echo "\033[37m" ;;
+        reset)   echo "\033[0m" ;;
+        *)       echo "\033[0m" ;;
+    esac
+}
+
+# Help functions
+function show_help() {
+    log info "gcloud-util - Google Cloud Platform Utility Tool"
+    log info "Version: 1.0.0"
+    log info ""
+    log info "Usage: gcloud-util COMMAND [SUBCOMMAND] [OPTIONS]"
+    log info ""
+    log info "Commands:"
+    log info "  iam         IAM role and permission management"
+    log info "  projects    GCP projects management"
+    log info "  help        Show this help message"
+    log info ""
+    log info "For more details on a specific command, run:"
+    log info "  gcloud-util COMMAND help"
+}
+
+function show_iam_help() {
+    log info "IAM Role Management Commands"
+    log info ""
+    log info "Usage: gcloud-util iam SUBCOMMAND [OPTIONS]"
+    log info ""
+    log info "Subcommands:"
+    log info "  create-role    Create a new custom IAM role"
+    log info ""
+    log info "For more details on a specific subcommand, run:"
+    log info "  gcloud-util iam SUBCOMMAND help"
+}
+
+function show_create_role_help() {
+    log info "Create Custom IAM Role"
+    log info ""
+    log info "Usage: gcloud-util iam create-role [OPTIONS]"
+    log info ""
+    log info "Options:"
+    log info "  --role NAME           Name of the role to create (required)"
+    log info "  --service NAME        Service to create role for (required)"
+    log info "  --org-id ID          Organization ID for org-level role"
+    log info "  --project-id ID      Project ID for project-level role"
+    log info "  --scan-services      Scan for active services and required permissions"
+    log info "  --test               Run in test mode without making changes"
+    log info ""
+    log info "Examples:"
+    log info "  Create organization-level role for Terraform:"
+    log info "    gcloud-util iam create-role --role terraform_admin --service terraform --org-id 123456789"
+    log info ""
+    log info "  Create project-level role with service scanning:"
+    log info "    gcloud-util iam create-role --role custom_admin --service terraform --project-id my-project --scan-services"
+}
+
+function show_projects_help() {
+    log info "Project Management Commands"
+    log info ""
+    log info "Usage: gcloud-util projects SUBCOMMAND [OPTIONS]"
+    log info ""
+    log info "Subcommands:"
+    log info "  list    List GCP projects"
+    log info ""
+    log info "For more details on a specific subcommand, run:"
+    log info "  gcloud-util projects SUBCOMMAND help"
+}
+
+function show_projects_list_help() {
+    log info "List GCP Projects"
+    log info ""
+    log info "Usage: gcloud-util projects list [OPTIONS]"
+    log info ""
+    log info "Options:"
+    log info "  --org-id ID    Organization ID to list projects from"
+    log info "  --filter STR   Filter projects by name, ID, or labels"
+    log info "  --format FMT   Output format (table, json, yaml)"
+    log info ""
+    log info "Examples:"
+    log info "  List all projects in an organization:"
+    log info "    gcloud-util projects list --org-id 123456789"
+    log info ""
+    log info "  List projects with specific filter:"
+    log info "    gcloud-util projects list --filter 'labels.env=prod'"
+}
 

@@ -1,0 +1,29 @@
+ssl_check() {
+  if [ -z "$1" ]; then
+    echo "Usage: ssl_check <DOMAIN>"
+    echo "  <DOMAIN> - The domain to check SSL certificate status."
+    echo ""
+    echo "Example: ssl_check sftp.empassion.com"
+    return 1
+  fi
+  
+  DOMAIN=$1
+  PORT="443"
+  echo ""; echo "SSL Check for $DOMAIN"; echo ""
+  cert_info=$(openssl s_client -connect $DOMAIN:$PORT -servername $DOMAIN </dev/null 2>/dev/null | openssl x509 -noout -text)
+  expiration_date=$(echo "$cert_info" | grep "Not After" | sed "s/Not After : //")
+  expiration_date=$(echo "$expiration_date" | sed "s/ GMT//")
+  issuer=$(echo "$cert_info" | grep "Issuer" | sed "s/Issuer: //")
+  subject=$(echo "$cert_info" | grep "Subject" | sed "s/Subject: //")
+  expiration_seconds=$(date -j -f "%b %d %T %Y" "$expiration_date" +%s)
+  current_seconds=$(date +%s)
+  ssl_check=$(openssl s_client -connect $DOMAIN:$PORT -servername $DOMAIN </dev/null 2>/dev/null | grep -i "Protocol  : TLS")
+  [ $current_seconds -ge $expiration_seconds ] && expiration_status="❌ Expired" || expiration_status="✅ Valid"
+  [ -z "$ssl_check" ] && ssl_status="❌ SSL/TLS Failed" || ssl_status="✅ SSL/TLS Successful"
+  echo "Certificate Details for $DOMAIN:"
+  echo "  Subject: $subject"
+  echo "  Issuer: $issuer"
+  echo "  Expiration Date: $expiration_date"
+  echo "SSL Certificate Status: $expiration_status, $ssl_status"
+  echo ""
+}

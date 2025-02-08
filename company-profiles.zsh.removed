@@ -1,0 +1,328 @@
+#!/bin/zsh
+
+# Define error codes
+typeset -A ERROR_CODES=(
+    [INVALID_ARGUMENT]=1
+    [FILE_NOT_FOUND]=2
+    [DEPENDENCY_MISSING]=3
+    [PROFILE_NOT_FOUND]=4
+)
+
+# Function to find Chrome profile directory
+function _find_chrome_profile() {
+    local profile_name=$1
+    local chrome_dir
+    local state_file
+
+    # Determine Chrome directory based on OS
+    case "$(uname)" in
+        "Darwin")  # macOS
+            chrome_dir="$HOME/Library/Application Support/Google/Chrome"
+            ;;
+        "Linux")
+            chrome_dir="$HOME/.config/google-chrome"
+            ;;
+        *)
+            handle_error ${ERROR_CODES[DEPENDENCY_MISSING]} "Unsupported operating system"
+            return ${ERROR_CODES[DEPENDENCY_MISSING]}
+            ;;
+    esac
+
+    state_file="$chrome_dir/Local State"
+    if [[ ! -f "$state_file" ]]; then
+        handle_error ${ERROR_CODES[FILE_NOT_FOUND]} "Chrome Local State file not found: $state_file"
+        return ${ERROR_CODES[FILE_NOT_FOUND]}
+    fi
+
+    # Use jq to parse the Local State file if available
+    if command -v jq >/dev/null 2>&1; then
+        local profile_dir
+        profile_dir=$(jq -r --arg name "$profile_name" '.profile.info_cache | to_entries[] | select(.value.name == $name) | .key' "$state_file" 2>/dev/null)
+        if [[ -n "$profile_dir" ]]; then
+            echo "$profile_dir"
+            return 0
+        fi
+    fi
+
+    # Fallback to grep and manual parsing if jq is not available
+    if grep -q "\"name\": *\"$profile_name\"" "$state_file" 2>/dev/null; then
+        local line
+        line=$(grep -B2 "\"name\": *\"$profile_name\"" "$state_file" | grep "^    \".*\": {$" | head -n1)
+        if [[ -n "$line" ]]; then
+            echo "$line" | sed 's/^    "\(.*\)": {$/\1/'
+            return 0
+        fi
+    fi
+
+    handle_error ${ERROR_CODES[PROFILE_NOT_FOUND]} "Could not find Chrome profile: $profile_name"
+    return ${ERROR_CODES[PROFILE_NOT_FOUND]}
+}
+
+# Default company profiles with profile names instead of directory numbers
+typeset -A CHROME_PROFILES=(
+    [empassion]="empassion.com"
+    [ayblehealth]="ayblehealth.com"
+    [ncd]="northcoastdevops.com"
+)
+
+typeset -A GIT_SSH_KEYS=(
+    [ayble]="~/.ssh/ayble"
+    [empassion]="~/.ssh/empassion"
+    [ncd]="~/.ssh/id_rsa"
+)
+
+# Error handling function
+function handle_error() {
+    local code=$1
+    local message=$2
+    local details=$3
+    echo "Error: $message" >&2
+    [[ -n "$details" ]] && echo "$details" >&2
+    return $code
+}
+
+# Function to show help
+function _company_profile_help() {
+    cat << EOF
+Usage: company-profile <command> <company> [options]
+
+Commands:
+  chrome <company>     Open Chrome with company profile
+  git <company> [args] Configure Git with company SSH key
+  list                List available company profiles
+  help                Show this help message
+
+Options:
+  --help, -h         Show this help message
+  
+Examples:
+  company-profile chrome empassion
+  company-profile git ayble status
+  company-profile list
+                                        
+Available Companies:
+  Chrome: ${(k)CHROME_PROFILES}
+  Git: ${(k)GIT_SSH_KEYS}
+
+Notes:
+  - Chrome profiles must be configured in Chrome before use
+  - SSH keys must exist in the specified locations
+  - Use 'company-profile list' to see key status
+EOF
+}
+
+function _chrome_help() {
+    cat << EOF
+Usage: company-profile chrome <company>
+
+Open Chrome with a specific company profile.
+
+Arguments:
+  company            Company name to use profile for
+
+Available Companies:
+  ${(k)CHROME_PROFILES}
+
+Example:
+  company-profile chrome empassion
+EOF
+}
+
+function _git_help() {
+    cat << EOF
+Usage: company-profile git <company> [git-command...]
+
+Configure Git with company-specific SSH key.
+
+Arguments:
+  company            Company name to use SSH key for
+  git-command        Optional Git commands to execute
+
+Available Companies:
+  ${(k)GIT_SSH_KEYS}
+
+Examples:
+  company-profile git ayble
+  company-profile git empassion status
+  company-profile git ncd push origin main
+EOF
+}
+
+function _list_help() {
+    cat << EOF
+Usage: company-profile list
+
+List all available company profiles and their status.
+
+Output Format:
+  Chrome profiles:    company -> profile
+  Git SSH keys:      company -> key path [status]
+  Status:            [✓] = exists, [✗] = missing
+
+Example:
+  company-profile list
+EOF
+}
+
+# Function to list available Chrome profiles
+function _list_chrome_profiles() {
+    local chrome_dir
+    local state_file
+
+    # Determine Chrome directory based on OS
+    case "$(uname)" in
+        "Darwin")  # macOS
+            chrome_dir="$HOME/Library/Application Support/Google/Chrome"
+            ;;
+        "Linux")
+            chrome_dir="$HOME/.config/google-chrome"
+            ;;
+        *)
+            handle_error ${ERROR_CODES[DEPENDENCY_MISSING]} "Unsupported operating system"
+            return ${ERROR_CODES[DEPENDENCY_MISSING]}
+            ;;
+    esac
+
+    state_file="$chrome_dir/Local State"
+    if [[ ! -f "$state_file" ]]; then
+        handle_error ${ERROR_CODES[FILE_NOT_FOUND]} "Chrome Local State file not found: $state_file"
+        return ${ERROR_CODES[FILE_NOT_FOUND]}
+    fi
+
+    echo "Available Chrome profiles in your installation:"
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.profile.info_cache | to_entries[] | "  \(.value.name) -> \(.key)"' "$state_file" 2>/dev/null
+    else
+        grep -A1 "^    \".*\": {$" "$state_file" | grep "\"name\":" | sed 's/^.*"name": *"\(.*\)",\?$/\1/'
+    fi
+    echo
+}
+
+function _company_profile() {
+    emulate -L zsh
+    setopt err_return local_options local_traps pipe_fail
+
+    # Show help if requested or no arguments
+    if [[ "$1" == "--help" || "$1" == "-h" || $# -eq 0 ]]; then
+        _company_profile_help
+        return 0
+    fi
+
+    cmd=$1
+    company=$2
+    [[ $# -gt 2 ]] && shift 2
+
+    # Validate command
+    if [[ -z "$cmd" ]]; then
+        handle_error ${ERROR_CODES[INVALID_ARGUMENT]} "No command specified"
+        _company_profile_help
+        return ${ERROR_CODES[INVALID_ARGUMENT]}
+    fi
+
+    case "$cmd" in
+        chrome)
+            if [[ "$company" == "--help" || "$company" == "-h" ]]; then
+                _chrome_help
+                return 0
+            fi
+
+            if [[ -z "$company" ]]; then
+                handle_error ${ERROR_CODES[INVALID_ARGUMENT]} "No company specified" "Available companies: ${(k)CHROME_PROFILES}"
+                _company_profile_help
+                return ${ERROR_CODES[INVALID_ARGUMENT]}
+            fi
+            
+            if [[ -n "${CHROME_PROFILES[$company]}" ]]; then
+                if ! command -v open >/dev/null 2>&1; then
+                    handle_error ${ERROR_CODES[DEPENDENCY_MISSING]} "Required command 'open' not found"
+                    return ${ERROR_CODES[DEPENDENCY_MISSING]}
+                fi
+
+                local profile_dir
+                profile_dir=$(_find_chrome_profile "${CHROME_PROFILES[$company]}")
+                if [[ $? -eq 0 && -n "$profile_dir" ]]; then
+                    open -na "Google Chrome" --args --profile-directory="$profile_dir"
+                else
+                    return ${ERROR_CODES[PROFILE_NOT_FOUND]}
+                fi
+            else
+                handle_error ${ERROR_CODES[INVALID_ARGUMENT]} "Unknown company profile: $company" "Available profiles: ${(k)CHROME_PROFILES}"
+                return ${ERROR_CODES[INVALID_ARGUMENT]}
+            fi
+            ;;
+        git)
+            if [[ "$company" == "--help" || "$company" == "-h" ]]; then
+                _git_help
+                return 0
+            fi
+
+            if [[ -z "$company" ]]; then
+                handle_error ${ERROR_CODES[INVALID_ARGUMENT]} "No company specified" "Available companies: ${(k)GIT_SSH_KEYS}"
+                _company_profile_help
+                return ${ERROR_CODES[INVALID_ARGUMENT]}
+            fi
+            
+            if [[ -n "${GIT_SSH_KEYS[$company]}" ]]; then
+                ssh_key="${GIT_SSH_KEYS[$company]/#\~/$HOME}"
+                
+                if [[ ! -f "$ssh_key" ]]; then
+                    handle_error ${ERROR_CODES[FILE_NOT_FOUND]} "SSH key not found: $ssh_key"
+                    return ${ERROR_CODES[FILE_NOT_FOUND]}
+                fi
+
+                if ! command -v git >/dev/null 2>&1; then
+                    handle_error ${ERROR_CODES[DEPENDENCY_MISSING]} "Required command 'git' not found"
+                    return ${ERROR_CODES[DEPENDENCY_MISSING]}
+                fi
+
+                export GIT_SSH_COMMAND="ssh -i ${ssh_key}"
+                if [[ $# -gt 0 ]]; then
+                    git "$@"
+                fi
+            else
+                handle_error ${ERROR_CODES[INVALID_ARGUMENT]} "Unknown company profile: $company" "Available profiles: ${(k)GIT_SSH_KEYS}"
+                return ${ERROR_CODES[INVALID_ARGUMENT]}
+            fi
+            ;;
+        list)
+            if [[ "$company" == "--help" || "$company" == "-h" ]]; then
+                _list_help
+                return 0
+            fi
+
+            echo "Available Chrome profiles:"
+            for c in "${(k)CHROME_PROFILES[@]}"; do
+                echo "  $c -> ${CHROME_PROFILES[$c]}"
+            done
+            echo
+            _list_chrome_profiles
+            echo "Available Git SSH profiles:"
+            for c in "${(k)GIT_SSH_KEYS[@]}"; do
+                key="${GIT_SSH_KEYS[$c]/#\~/$HOME}"
+                exists=$([ -f "$key" ] && echo "✓" || echo "✗")
+                echo "  $c -> ${GIT_SSH_KEYS[$c]} [$exists]"
+            done
+            ;;
+        help)
+            _company_profile_help
+            return 0
+            ;;
+        *)
+            handle_error ${ERROR_CODES[INVALID_ARGUMENT]} "Unknown command: $cmd" "Use 'company-profile help' for usage"
+            _company_profile_help
+            return ${ERROR_CODES[INVALID_ARGUMENT]}
+            ;;
+    esac
+}
+
+# Define the main alias to call the function
+alias company-profile='_company_profile'
+
+# Maintain backward compatibility with existing aliases
+alias chrome-empassion='company-profile chrome empassion'
+alias chrome-ayblehealth='company-profile chrome ayblehealth'
+alias chrome-ncd='company-profile chrome ncd'
+
+alias git-ayble='company-profile git ayble'
+alias git-empassion='company-profile git empassion'
+alias git-ncd='company-profile git ncd'

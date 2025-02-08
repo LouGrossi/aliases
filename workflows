@@ -1,0 +1,451 @@
+#!/bin/bash
+
+# Setup autocompletion
+_workflows_completions() {
+    local cur prev words cword
+    _init_completion || return
+
+    # List of all commands
+    local commands="run list status help"
+    
+    # List of all options
+    local run_options="-w --workflow -e --environment -r --reason -b --branch -a --application -h --help"
+    local list_options="-a --application -b --branch --active -h --help"
+    local status_options="-w --workflow --tail -h --help"
+    
+    # List of applications
+    local applications="backend dashboard webapp"
+    
+    # List of environments
+    local environments="staging production"
+
+    # Handle first argument (command)
+    if [ $cword -eq 1 ]; then
+        COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+        return
+    fi
+
+    # Handle command-specific options
+    case "${words[1]}" in
+        run)
+            case "$prev" in
+                -a|--application)
+                    COMPREPLY=($(compgen -W "$applications" -- "$cur"))
+                    ;;
+                -e|--environment)
+                    COMPREPLY=($(compgen -W "$environments" -- "$cur"))
+                    ;;
+                -w|--workflow|-r|--reason|-b|--branch)
+                    # These options take custom values, no completion
+                    COMPREPLY=()
+                    ;;
+                *)
+                    COMPREPLY=($(compgen -W "$run_options" -- "$cur"))
+                    ;;
+            esac
+            ;;
+        list)
+            case "$prev" in
+                -a|--application)
+                    COMPREPLY=($(compgen -W "$applications" -- "$cur"))
+                    ;;
+                -b|--branch)
+                    # Branch takes custom value, no completion
+                    COMPREPLY=()
+                    ;;
+                *)
+                    COMPREPLY=($(compgen -W "$list_options" -- "$cur"))
+                    ;;
+            esac
+            ;;
+        status)
+            case "$prev" in
+                -w|--workflow)
+                    # Workflow ID takes custom value, no completion
+                    COMPREPLY=()
+                    ;;
+                *)
+                    COMPREPLY=($(compgen -W "$status_options" -- "$cur"))
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+# Register completion
+complete -F _workflows_completions workflows
+
+# Check if GitHub CLI is installed
+if ! command -v gh &> /dev/null; then
+    echo "Error: GitHub CLI is not installed"
+    echo "Please install it from: https://cli.github.com/"
+    exit 1
+fi
+
+# Check if authenticated with GitHub
+if ! gh auth status &> /dev/null; then
+    echo "Not authenticated with GitHub. Starting authentication process..."
+    gh auth login
+    if [ $? -ne 0 ]; then
+        echo "Error: GitHub authentication failed"
+        exit 1
+    fi
+fi
+
+show_help() {
+    echo "Usage: $0 <command> [options]"
+    echo
+    echo "Commands:"
+    echo "  run     Run a GitHub Actions workflow"
+    echo "  list    List GitHub Actions workflows"
+    echo "  status  Show status of a workflow run"
+    echo "  help    Show this help message"
+    echo
+    echo "Run options:"
+    echo "  -w, --workflow      Workflow to run (name or ID)"
+    echo "  -e, --environment   Environment to deploy to (staging|production)"
+    echo "  -r, --reason        Reason for deployment"
+    echo "  -b, --branch        Branch to run workflow from (default: current branch)"
+    echo "  -a, --application   Application to deploy (backend|dashboard|webapp) (default: backend)"
+    echo "  -h, --help          Show this help message"
+    echo
+    echo "List options:"
+    echo "  -a, --application   Application to list workflows for (backend|dashboard|webapp) (default: backend)"
+    echo "  -b, --branch        Branch to list workflows from (default: main)"
+    echo "  --active            Show only currently running workflows"
+    echo "  -h, --help          Show this help message"
+    echo
+    echo "Status options:"
+    echo "  -w, --workflow      Workflow run ID to check status"
+    echo "  --tail              Tail the workflow progress"
+    echo "  -h, --help          Show this help message"
+    echo
+    echo "Examples:"
+    echo "  $0 run -w deploy-v2.yaml -e staging -r \"Testing new feature\" -b feature/my-branch"
+    echo "  $0 run --workflow 12345678 --environment production --reason \"Production release\" -a webapp"
+    echo "  $0 list -a webapp -b develop"
+    echo "  $0 status -w 1234567890"
+    echo "  $0 status -w 1234567890 --tail"
+}
+
+show_run_help() {
+    echo "Usage: $0 run [options]"
+    echo
+    echo "Run a GitHub Actions workflow"
+    echo
+    echo "Options:"
+    echo "  -w, --workflow      Workflow to run (name or ID)"
+    echo "  -e, --environment   Environment to deploy to (staging|production)"
+    echo "  -r, --reason        Reason for deployment"
+    echo "  -b, --branch        Branch to run workflow from (default: current branch)"
+    echo "  -a, --application   Application to deploy (backend|dashboard|webapp) (default: backend)"
+    echo "  -h, --help          Show this help message"
+    echo
+    echo "Example:"
+    echo "  $0 run -w deploy-v2.yaml -e staging -r \"Testing new feature\" -b feature/my-branch"
+    echo "  $0 run --workflow 12345678 --environment production --reason \"Production release\" -a webapp"
+}
+
+show_list_help() {
+    echo "Usage: $0 list [options]"
+    echo
+    echo "List GitHub Actions workflows"
+    echo
+    echo "Options:"
+    echo "  -a, --application   Application to list workflows for (backend|dashboard|webapp) (default: backend)"
+    echo "  -b, --branch        Branch to list workflows from (default: main)"
+    echo "  --active            Show only currently running workflows"
+    echo "  -h, --help          Show this help message"
+    echo
+    echo "Example:"
+    echo "  $0 list"
+    echo "  $0 list -a webapp -b develop"
+    echo "  $0 list --active"
+}
+
+show_status_help() {
+    echo "Usage: $0 status [options]"
+    echo
+    echo "Show status of a workflow run"
+    echo
+    echo "Options:"
+    echo "  -w, --workflow      Workflow run ID to check status"
+    echo "  --tail              Tail the workflow progress"
+    echo "  -h, --help          Show this help message"
+    echo
+    echo "Example:"
+    echo "  $0 status -w 1234567890"
+    echo "  $0 status -w 1234567890 --tail"
+}
+
+status_workflow() {
+    # Default values
+    WORKFLOW=""
+    TAIL=false
+
+    # Parse parameters
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -w|--workflow)
+                WORKFLOW="$2"
+                shift 2
+                ;;
+            --tail)
+                TAIL=true
+                shift
+                ;;
+            -h|--help)
+                show_status_help
+                exit 0
+                ;;
+            *)
+                echo "Error: Unknown parameter $1"
+                show_status_help
+                exit 1
+                ;;
+        esac
+    done
+
+    # Validate required parameters
+    if [ -z "$WORKFLOW" ]; then
+        echo "Error: Missing required parameter: workflow"
+        show_status_help
+        exit 1
+    fi
+
+    # Show workflow status
+    if [ "$TAIL" = true ]; then
+        echo "Tailing workflow run $WORKFLOW:"
+        echo
+        gh run watch "$WORKFLOW"
+    else
+        echo "Status for workflow run $WORKFLOW:"
+        echo
+        gh run view "$WORKFLOW" --log
+    fi
+}
+
+run_workflow() {
+    # Default values
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    APPLICATION="backend"
+
+    # Parse parameters
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -w|--workflow)
+                WORKFLOW="$2"
+                shift 2
+                ;;
+            -e|--environment)
+                ENVIRONMENT="$2"
+                shift 2
+                ;;
+            -r|--reason)
+                REASON="$2"
+                shift 2
+                ;;
+            -b|--branch)
+                BRANCH="$2"
+                shift 2
+                ;;
+            -a|--application)
+                APPLICATION="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_run_help
+                exit 0
+                ;;
+            *)
+                echo "Error: Unknown parameter $1"
+                show_run_help
+                exit 1
+                ;;
+        esac
+    done
+
+    # Validate required parameters
+    if [ -z "$WORKFLOW" ] || [ -z "$ENVIRONMENT" ] || [ -z "$REASON" ]; then
+        echo "Error: Missing required parameters"
+        show_run_help
+        exit 1
+    fi
+
+    # Validate environment
+    if [ "$ENVIRONMENT" != "staging" ] && [ "$ENVIRONMENT" != "production" ]; then
+        echo "Error: Environment must be either 'staging' or 'production'"
+        show_run_help
+        exit 1
+    fi
+
+    # Validate application
+    if [ "$APPLICATION" != "backend" ] && [ "$APPLICATION" != "dashboard" ] && [ "$APPLICATION" != "webapp" ]; then
+        echo "Error: Application must be one of: backend, dashboard, webapp"
+        show_run_help
+        exit 1
+    fi
+
+    # Map application to repository
+    case $APPLICATION in
+        backend)
+            REPO="ayble-health/backend"
+            ;;
+        dashboard)
+            REPO="ayble-health/dashboard"
+            ;;
+        webapp)
+            REPO="ayble-health/webapp"
+            ;;
+    esac
+
+    # Run the workflow
+    echo "Running GitHub workflow:"
+    echo "  Workflow: $WORKFLOW"
+    echo "  Environment: $ENVIRONMENT"
+    echo "  Reason: $REASON"
+    echo "  Branch: $BRANCH"
+    echo "  Application: $APPLICATION"
+    echo
+
+    # Check if workflow is a local file
+    if [ -f "$WORKFLOW" ]; then
+        # Read the workflow file content
+        WORKFLOW_CONTENT=$(cat "$WORKFLOW")
+        
+        # Extract workflow name from path
+        WORKFLOW_NAME=$(basename "$WORKFLOW")
+        
+        # Map application to repository
+        case $APPLICATION in
+            backend)
+                REPO="ayble-health/backend"
+                ;;
+            dashboard)
+                REPO="ayble-health/dashboard"
+                ;;
+            webapp)
+                REPO="ayble-health/webapp"
+                ;;
+        esac
+
+        echo "Running local workflow file: $WORKFLOW"
+        echo "$WORKFLOW_CONTENT" | gh workflow run -R "$REPO" "$WORKFLOW_NAME" -f environment="$ENVIRONMENT" -f reason="$REASON" -r "$BRANCH"
+    else
+        gh workflow run -R "$REPO" "$WORKFLOW" -f environment="$ENVIRONMENT" -f reason="$REASON" -r "$BRANCH"
+    fi
+}
+
+list_workflows() {
+    # Default values
+    APPLICATION="backend"
+    BRANCH="main"
+    ACTIVE=false
+
+    # Parse parameters
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -a|--application)
+                if [ "$ACTIVE" = true ]; then
+                    echo "Error: --active cannot be used with other parameters"
+                    show_list_help
+                    exit 1
+                fi
+                APPLICATION="$2"
+                shift 2
+                ;;
+            -b|--branch)
+                if [ "$ACTIVE" = true ]; then
+                    echo "Error: --active cannot be used with other parameters"
+                    show_list_help
+                    exit 1
+                fi
+                BRANCH="$2"
+                shift 2
+                ;;
+            --active)
+                if [ -n "$APPLICATION" ] && [ "$APPLICATION" != "backend" ] || [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ]; then
+                    echo "Error: --active cannot be used with other parameters"
+                    show_list_help
+                    exit 1
+                fi
+                ACTIVE=true
+                shift
+                ;;
+            -h|--help)
+                show_list_help
+                exit 0
+                ;;
+            *)
+                echo "Error: Unknown parameter $1"
+                show_list_help
+                exit 1
+                ;;
+        esac
+    done
+
+    if [ "$ACTIVE" = true ]; then
+        echo "Listing active GitHub workflows:"
+        echo
+        gh run list --json name,status,workflowName,event,headBranch --jq '.[] | select(.status=="in_progress") | "\(.workflowName) (\(.name)) - Branch: \(.headBranch) - Event: \(.event)"'
+        exit 0
+    fi
+
+    # Validate application
+    if [ "$APPLICATION" != "backend" ] && [ "$APPLICATION" != "dashboard" ] && [ "$APPLICATION" != "webapp" ]; then
+        echo "Error: Application must be one of: backend, dashboard, webapp"
+        show_list_help
+        exit 1
+    fi
+
+    # List the workflows
+    echo "Listing GitHub workflows:"
+    echo "  Application: $APPLICATION"
+    echo "  Branch: $BRANCH"
+    echo
+
+    # Map application to repository
+    case $APPLICATION in
+        backend)
+            REPO="ayble-health/backend"
+            ;;
+        dashboard)
+            REPO="ayble-health/dashboard"
+            ;;
+        webapp)
+            REPO="ayble-health/webapp"
+            ;;
+    esac
+
+    NO_PAGER=1 gh workflow list -R "$REPO" --limit 100
+}
+
+# Main command router
+case "${1:-}" in
+    run)
+        shift
+        run_workflow "$@"
+        ;;
+    list)
+        shift
+        list_workflows "$@"
+        ;;
+    status)
+        shift
+        status_workflow "$@"
+        ;;
+    help|--help|-h)
+        show_help
+        exit 0
+        ;;
+    "")
+        echo "Error: No command specified"
+        show_help
+        exit 1
+        ;;
+    *)
+        echo "Error: Unknown command '$1'"
+        show_help
+        exit 1
+        ;;
+esac 
